@@ -65,10 +65,13 @@ For any LangGraph, agent, or orchestration code:
 - Add a comment above EVERY node/edge explaining what it does in plain English
 - Add a comment explaining the overall graph flow at the top of the function
 
-### 5. No Silent Failures
+### 5. No Silent Failures — Fail Hard, Always
 - Always raise named exceptions with helpful messages.
 - Example: raise ValueError(f"Could not find P&L table for ticker {ticker}. Check if Screener page structure has changed.")
 - Never use bare except: pass
+- **Every field in the scraper output is required.** If any field cannot be extracted, raise immediately.
+- Never return partial data or substitute None for a missing field. The caller must get either complete data or a clear exception — never something in between.
+- This rule exists so every scraping failure is visible and fixable. It will be relaxed explicitly once the scraper is stable.
 
 ### 6. API Keys
 - All keys go in .env only
@@ -141,9 +144,15 @@ fintel/
     └── test_scraper.py
 ```
 
+## Testing Rules
+- **Live tests only.** Tests must hit real Screener.in with real credentials loaded from .env.
+- No mocks, no fixture HTML, no dummy/hardcoded values anywhere in tests or in the codebase.
+- Tests are skipped (not failed) if SCREENER_EMAIL is not set in the environment.
+- The purpose of tests is to verify the scraper works against the real live website — not to test logic in isolation.
+
 ## Known Limitations
 [Update this as you build]
 - Screener.in has no official API — HTML structure may change
 - Add 2–3 second delays between Screener requests to avoid IP blocks
 - Indian stocks only in Phase 1
-- NewsAPI free tier: 100 requests/days
+- NewsAPI free tier: 100 requests/day
