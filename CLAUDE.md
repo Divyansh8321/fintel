@@ -74,6 +74,7 @@ For any LangGraph, agent, or orchestration code:
 - All keys go in .env only
 - Use python-dotenv to load them
 - Keys required: OPENAI_API_KEY, SCREENER_EMAIL, SCREENER_PASSWORD, NEWS_API_KEY
+- Never hardcode keys or commit .env to version control
 
 ### 7. LLM Model
 - Use OpenAI API only (not Anthropic) for demo purposes
@@ -82,10 +83,11 @@ For any LangGraph, agent, or orchestration code:
 - Import pattern: from openai import OpenAI
 
 ### 8. Caching
-- NO SQLite cache in Phase 1
-- Use a simple Python dict for in-session caching only:
-  _cache = {}  # { "RELIANCE": { data... } }
-- Do not build a database until explicitly asked
+- SQLite cache with 24-hour TTL
+- DB file lives at: data/cache/fintel.db (never in src/)
+- Cache layer is src/cache.py — exactly 3 functions: init_db(), get_cached(), set_cached()
+- No ORM, no extra deps — stdlib sqlite3 + json only
+- Keep it minimal: single table, no indexes, no migrations
 
 ### 9. Frontend
 - Streamlit only, one file: frontend/app.py
@@ -111,14 +113,33 @@ streamlit run frontend/app.py           # frontend on :8501
 ## Build Order (Phase 1)
 Build in this exact order, 2–3 files at a time:
 
-**Batch 1:** requirements.txt + .env.example + CLAUDE.md
+**Batch 1:** requirements.txt + .env.example + CLAUDE.md  ✅
 **Batch 2:** src/scraper.py
-**Batch 3:** src/analysis.py
+**Batch 3:** src/cache.py + src/analysis.py
 **Batch 4:** src/api.py
 **Batch 5:** frontend/app.py
 **Batch 6:** tests/test_scraper.py
 
 Wait for approval after each batch.
+
+## Folder Structure
+```
+fintel/
+├── CLAUDE.md
+├── .env.example
+├── requirements.txt
+├── data/
+│   └── cache/              ← SQLite DB lives here (fintel.db)
+├── src/
+│   ├── scraper.py          ← Screener.in scraper
+│   ├── cache.py            ← SQLite cache layer (3 functions)
+│   ├── analysis.py         ← OpenAI gpt-4o brief generator
+│   └── api.py              ← FastAPI backend
+├── frontend/
+│   └── app.py              ← Streamlit UI
+└── tests/
+    └── test_scraper.py
+```
 
 ## Known Limitations
 [Update this as you build]
