@@ -16,7 +16,7 @@ import re
 import time
 
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -167,6 +167,29 @@ def _fetch_page(ticker: str) -> tuple[BeautifulSoup, bool]:
 
 
 # ---------------------------------------------------------------------------
+# Unit metadata constants
+# ---------------------------------------------------------------------------
+
+# Static unit map for all header and key_ratios fields.
+# These are fixed for Indian companies on Screener.in — always INR.
+_HEADER_UNITS: dict[str, str] = {
+    "current_price":    "INR",
+    "market_cap":       "INR_Cr",   # INR Crores
+    "high_52w":         "INR",
+    "low_52w":          "INR",
+    "book_value":       "INR",
+    "face_value":       "INR",
+    "dividend_yield":   "%",
+    "price_change_pct": "%",
+    "pe":               "x",        # dimensionless multiple
+    "roce":             "%",
+    "roe":              "%",
+    "debt_to_equity":   "x",
+    "current_ratio":    "x",
+}
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers — data extraction utilities
 # ---------------------------------------------------------------------------
 
@@ -310,6 +333,68 @@ def _require_row(rows: dict, row_label: str, section: str, ticker: str) -> list[
         f"Could not find row '{row_label}' in '{section}' for ticker '{ticker}'. "
         "Screener.in page structure may have changed."
     )
+
+
+def _extract_section_units(section: BeautifulSoup, ticker: str) -> dict:
+    """
+    Extracts the scale and currency from a section's subtitle paragraph.
+
+    Screener.in renders a line like:
+        "Consolidated Figures in Rs. Crores"
+    or  "Standalone Figures in Rs. Crores"
+    inside a <p class="sub"> at the top of each financial table section.
+
+    This is parsed to produce a units dict that downstream consumers (e.g.
+    the LLM prompt, the frontend) can use to correctly interpret numbers.
+
+    Args:
+        section: BeautifulSoup element for the section (e.g. section#profit-loss).
+        ticker:  Ticker symbol used in error messages.
+
+    Returns:
+        dict with keys:
+            scale    (str) — "Cr" for Crores, "L" for Lakhs, or the raw token
+                             if an unrecognised scale is found.
+            currency (str) — "INR" when "Rs." is found; raw token otherwise.
+
+    Raises:
+        ValueError: if the <p class="sub"> subtitle paragraph is missing entirely,
+                    which would mean Screener.in has changed its page structure.
+    """
+    sub_p = section.select_one("p.sub")
+    if not sub_p:
+        raise ValueError(
+            f"Could not find unit subtitle (p.sub) in section "
+            f"'{section.get('id', '?')}' for ticker '{ticker}'. "
+            "Screener.in page structure may have changed."
+        )
+
+    # The first NavigableString child contains the full unit text plus a trailing " / "
+    # separator before the "View Standalone" link, e.g.:
+    #   "Consolidated Figures in Rs. Crores\n        /\n        "
+    # Split on "/" and take the part before it.
+    first_text_node = next(
+        (str(node) for node in sub_p.children if isinstance(node, NavigableString)),
+        "",
+    )
+    raw_text = first_text_node.split("/")[0].strip()
+
+    # Determine currency — "Rs." indicates Indian Rupees → INR
+    currency = "INR" if "rs." in raw_text.lower() else raw_text
+
+    # Determine scale — "Crores" → "Cr", "Lakhs" → "L"
+    text_lower = raw_text.lower()
+    if "crore" in text_lower:
+        scale = "Cr"
+    elif "lakh" in text_lower:
+        scale = "L"
+    else:
+        # Capture whatever unit token follows "in" (e.g. "in Millions")
+        parts = text_lower.split()
+        in_idx = next((i for i, p in enumerate(parts) if p == "in"), -1)
+        scale = parts[in_idx + 1] if in_idx >= 0 and in_idx + 1 < len(parts) else "unknown"
+
+    return {"scale": scale, "currency": currency}
 
 
 # ---------------------------------------------------------------------------
@@ -590,6 +675,7 @@ def _get_pl_table(soup: BeautifulSoup, ticker: str) -> dict:
         return [_parse_number_or_none(v) for v in raw[: len(years)]]
 
     return {
+        "units":               _extract_section_units(section, ticker),
         "years":               years,
         "sales":               _row("Sales"),
         "operating_profit":    _row("Operating Profit"),
@@ -725,6 +811,7 @@ def _get_balance_sheet(soup: BeautifulSoup, ticker: str) -> dict:
         return [_parse_number_or_none(v) for v in raw[: len(years)]]
 
     return {
+        "units":          _extract_section_units(section, ticker),
         "years":          years,
         "equity_capital": _row("Equity Capital"),
         "reserves":       _row("Reserves"),
@@ -774,6 +861,7 @@ def _get_cash_flow(soup: BeautifulSoup, ticker: str) -> dict:
         return [_parse_number_or_none(v) for v in raw[: len(years)]]
 
     return {
+        "units":         _extract_section_units(section, ticker),
         "years":         years,
         "operating":     _row("Cash from Operating"),
         "investing":     _row("Cash from Investing"),
@@ -818,6 +906,7 @@ def _get_ratios_table(soup: BeautifulSoup, ticker: str) -> dict:
         return [_parse_number_or_none(v) for v in raw[: len(years)]]
 
     return {
+        "units":                 _extract_section_units(section, ticker),
         "years":                 years,
         "debtor_days":           _row("Debtor Days"),
         "inventory_days":        _row("Inventory Days"),
@@ -864,6 +953,7 @@ def _get_quarterly_results(soup: BeautifulSoup, ticker: str) -> dict:
         return [_parse_number_or_none(v) for v in raw[: len(quarters)]]
 
     return {
+        "units":            _extract_section_units(section, ticker),
         "quarters":         quarters,
         "sales":            _row("Sales"),
         "operating_profit": _row("Operating Profit"),
@@ -1010,15 +1100,17 @@ def fetch_company_data(ticker: str) -> dict:
     Returns:
         dict with keys:
             is_consolidated (bool)
+            currency (str)       — top-level currency code, e.g. "INR"
             header (dict)        — name, sector, codes, price, market cap, etc.
+            header_units (dict)  — unit per header/key_ratios field (e.g. "INR", "%", "x")
             key_ratios (dict)    — pe, book_value, roce, roe, debt_to_equity, current_ratio
-            pl_table (dict)      — 10-year annual P&L
-            growth_rates (dict)  — sales and profit CAGR at 3/5/10yr and TTM
-            balance_sheet (dict) — 10-year annual balance sheet
-            cash_flow (dict)     — 10-year annual cash flow
-            ratios_table (dict)  — 10-year efficiency ratios
-            quarterly (dict)     — recent quarterly results
-            shareholding (dict)  — latest quarter shareholding pattern
+            pl_table (dict)      — 10-year annual P&L; includes "units" key
+            growth_rates (dict)  — sales and profit CAGR at 3/5/10yr and TTM (always %)
+            balance_sheet (dict) — 10-year annual balance sheet; includes "units" key
+            cash_flow (dict)     — 10-year annual cash flow; includes "units" key
+            ratios_table (dict)  — 10-year efficiency ratios; includes "units" key
+            quarterly (dict)     — recent quarterly results; includes "units" key
+            shareholding (dict)  — latest quarter shareholding pattern (always %)
             pros_cons (dict)     — Screener's generated pros and cons
 
     Raises:
@@ -1030,9 +1122,22 @@ def fetch_company_data(ticker: str) -> dict:
 
     soup, is_consolidated = _fetch_page(ticker)
 
+    # Derive top-level currency from the first financial section's unit subtitle.
+    # All sections on the same page share the same currency (always INR for Indian
+    # companies on Screener.in), so reading once from profit-loss is sufficient.
+    pl_section = soup.find("section", id="profit-loss")
+    if not pl_section:
+        raise ValueError(
+            f"Could not find section#profit-loss to determine currency for ticker '{ticker}'."
+        )
+    pl_units = _extract_section_units(pl_section, ticker)
+    top_currency = pl_units["currency"]   # "INR" for Indian companies
+
     return {
         "is_consolidated": is_consolidated,
+        "currency":        top_currency,
         "header":          _get_company_header(soup, ticker),
+        "header_units":    _HEADER_UNITS,
         "key_ratios":      _get_key_ratios(soup, ticker),
         "pl_table":        _get_pl_table(soup, ticker),
         "growth_rates":    _get_growth_rates(soup, ticker),
