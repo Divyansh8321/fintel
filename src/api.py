@@ -1,0 +1,139 @@
+# ============================================================
+# FILE: src/api.py
+# PURPOSE: FastAPI backend that ties together the scraper,
+#          cache, and analysis layers. Exposes two endpoints:
+#          GET /health and POST /analyze.
+# INPUT:   POST /analyze body: {"ticker": str}
+# OUTPUT:  JSON dict with scraped data + investment brief,
+#          plus a "source" field ("cache" or "live")
+# DEPENDS: fastapi, uvicorn, src/scraper.py, src/cache.py,
+#          src/analysis.py, .env (all keys)
+# ============================================================
+
+from contextlib import asynccontextmanager
+
+import requests as req_lib
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from openai import OpenAIError
+from pydantic import BaseModel
+
+from src.analysis import generate_brief
+from src.cache import get_cached, init_db, set_cached
+from src.scraper import fetch_company_data
+
+load_dotenv()
+
+
+# ---------------------------------------------------------------------------
+# Startup / shutdown lifecycle
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    FastAPI lifespan context manager.
+
+    On startup: initialises the SQLite cache database (creates the table
+    if it doesn't exist). This runs once before the first request is served.
+    On shutdown: nothing to clean up — SQLite connections are per-request.
+    """
+    init_db()
+    yield
+
+
+app = FastAPI(
+    title="Fintel API",
+    description="AI-powered investment research for Indian stocks.",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+
+# ---------------------------------------------------------------------------
+# Request / response models
+# ---------------------------------------------------------------------------
+
+class AnalyzeRequest(BaseModel):
+    """Request body for POST /analyze."""
+    ticker: str
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/health")
+def health():
+    """
+    Health check endpoint.
+
+    Returns:
+        {"status": "ok"} — always, as long as the server is running.
+    """
+    return {"status": "ok"}
+
+
+@app.post("/analyze")
+def analyze(body: AnalyzeRequest):
+    """
+    Main analysis endpoint. Fetches fundamental data for a ticker,
+    generates an AI investment brief, and returns the combined result.
+
+    Checks the SQLite cache first. If a fresh entry (< 24hr) exists,
+    returns it immediately without hitting Screener.in or OpenAI.
+    Otherwise scrapes live data, generates the brief, caches the result,
+    and returns it.
+
+    Args:
+        body: AnalyzeRequest with field "ticker" (NSE/BSE symbol).
+
+    Returns:
+        JSON dict with keys:
+            source  (str)  — "cache" if served from cache, "live" if freshly scraped
+            data    (dict) — full output of fetch_company_data()
+            brief   (dict) — output of generate_brief(): scores, risk flags, verdict
+
+    Raises:
+        400: if the ticker is not found on Screener.in or any required field
+             is missing from the scraped data (ValueError from scraper/analysis).
+        503: if Screener.in authentication fails (RuntimeError) or a network
+             error occurs while fetching the page.
+        502: if the OpenAI API call fails.
+    """
+    ticker = body.ticker.strip().upper()
+
+    # --- Cache hit ---
+    cached = get_cached(ticker)
+    if cached is not None:
+        return {"source": "cache", **cached}
+
+    # --- Live scrape ---
+    try:
+        company_data = fetch_company_data(ticker)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except req_lib.exceptions.RequestException as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Network error while fetching data for '{ticker}': {e}",
+        )
+
+    # --- AI brief ---
+    try:
+        brief = generate_brief(company_data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except OpenAIError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"OpenAI API error while generating brief for '{ticker}': {e}",
+        )
+
+    # --- Cache and return ---
+    result = {"data": company_data, "brief": brief}
+    set_cached(ticker, result)
+
+    return {"source": "live", **result}
