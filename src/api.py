@@ -134,6 +134,11 @@ def analyze(body: AnalyzeRequest):
 
     # --- Cache and return ---
     result = {"data": company_data, "brief": brief}
-    set_cached(ticker, result)
+    # Cache write failure (disk full, DB locked, etc.) must never break the
+    # response — the user already paid for the scrape + LLM call.
+    try:
+        set_cached(ticker, result)
+    except Exception as e:
+        print(f"Warning: cache write failed for '{ticker}': {e}")
 
     return {"source": "live", **result}

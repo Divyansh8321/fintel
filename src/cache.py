@@ -13,7 +13,11 @@ import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-DB_PATH = "data/cache/fintel.db"
+# Absolute path anchored to this file's location — works regardless of
+# which directory uvicorn/streamlit is launched from.
+DB_PATH = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "cache", "fintel.db")
+)
 TTL_HOURS = 24
 
 
@@ -74,12 +78,24 @@ def get_cached(ticker: str) -> dict | None:
     data_json, fetched_at_str = row
     fetched_at = datetime.fromisoformat(fetched_at_str)
 
-    # Expire entries older than TTL_HOURS
+    # Expire entries older than TTL_HOURS — delete the stale row so it
+    # doesn't accumulate indefinitely in the DB.
     cutoff = datetime.now(timezone.utc) - timedelta(hours=TTL_HOURS)
     if fetched_at < cutoff:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("DELETE FROM cache WHERE ticker = ?", (ticker,))
+            conn.commit()
         return None
 
-    return json.loads(data_json)
+    # Guard against DB corruption — treat a bad JSON row as a cache miss
+    # and delete it so the next request re-populates it cleanly.
+    try:
+        return json.loads(data_json)
+    except json.JSONDecodeError:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("DELETE FROM cache WHERE ticker = ?", (ticker,))
+            conn.commit()
+        return None
 
 
 def set_cached(ticker: str, data: dict) -> None:
