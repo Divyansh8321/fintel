@@ -18,8 +18,10 @@ from fastapi import FastAPI, HTTPException
 from openai import OpenAIError
 from pydantic import BaseModel
 
+import sqlite3
+
 from src.analysis import generate_brief
-from src.cache import get_cached, init_db, set_cached
+from src.cache import DB_PATH, get_cached, init_db, set_cached
 from src.scraper import fetch_company_data
 
 load_dotenv()
@@ -62,6 +64,35 @@ class AnalyzeRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+@app.delete("/cache/{ticker}")
+def clear_cache(ticker: str):
+    """
+    Deletes the cached entry for a ticker so the next /analyze call
+    fetches fresh data from Screener.in and re-runs the AI brief.
+
+    Args:
+        ticker: NSE/BSE stock symbol in the URL path, e.g. /cache/RELIANCE.
+
+    Returns:
+        {"cleared": True, "ticker": "RELIANCE"} on success.
+
+    Raises:
+        404: if there is no cached entry for the ticker.
+    """
+    ticker = ticker.strip().upper()
+    with sqlite3.connect(DB_PATH) as conn:
+        deleted = conn.execute(
+            "DELETE FROM cache WHERE ticker = ?", (ticker,)
+        ).rowcount
+        conn.commit()
+    if deleted == 0:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No cached entry found for '{ticker}'.",
+        )
+    return {"cleared": True, "ticker": ticker}
+
 
 @app.get("/health")
 def health():

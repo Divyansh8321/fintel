@@ -18,7 +18,23 @@ st.caption("Indian stocks powered by Screener.in + GPT-4o")
 
 ticker = st.text_input("NSE Ticker", placeholder="e.g. RELIANCE, INFY, TCS").strip().upper()
 
-if st.button("Analyze", disabled=not ticker):
+col_btn1, col_btn2 = st.columns([3, 1])
+analyze_clicked = col_btn1.button("Analyze", disabled=not ticker)
+clear_clicked   = col_btn2.button("Clear Cache", disabled=not ticker)
+
+if clear_clicked and ticker:
+    try:
+        resp = requests.delete(f"http://localhost:8000/cache/{ticker}", timeout=10)
+        if resp.status_code == 200:
+            st.success(f"Cache cleared for **{ticker}**. Next Analyze will fetch live data.")
+        elif resp.status_code == 404:
+            st.info(f"No cached entry for **{ticker}** — nothing to clear.")
+        else:
+            st.error(f"Failed to clear cache: {resp.text}")
+    except requests.exceptions.ConnectionError:
+        st.error("Cannot connect to the API.")
+
+if analyze_clicked:
     with st.spinner(f"Fetching data for {ticker}…"):
         try:
             resp = requests.post(API_URL, json={"ticker": ticker}, timeout=120)
