@@ -4,6 +4,9 @@
 #          fundamental data for a given NSE/BSE ticker.
 #          Tries the consolidated view first; falls back to
 #          standalone if consolidated is unavailable.
+#          Uses Screener's schedule sub-row API to get granular
+#          line items (CapEx, inventories, trade payables, etc.)
+#          that are only accessible via AJAX expansion.
 # INPUT:   ticker (str) — e.g. "RELIANCE", "INFY"
 # OUTPUT:  dict with all financial data sections (see
 #          fetch_company_data docstring for full schema)
@@ -25,8 +28,9 @@ load_dotenv()
 # Constants
 # ---------------------------------------------------------------------------
 
-LOGIN_URL = "https://www.screener.in/login/"
-COMPANY_URL = "https://www.screener.in/company/{ticker}/{variant}"
+LOGIN_URL    = "https://www.screener.in/login/"
+COMPANY_URL  = "https://www.screener.in/company/{ticker}/{variant}"
+SCHEDULE_URL = "https://www.screener.in/api/company/{company_id}/schedules/"
 REQUEST_DELAY_SECONDS = 2.5
 
 # Module-level authenticated session — created once on first use, reused
@@ -58,7 +62,7 @@ def _get_authenticated_session() -> requests.Session:
     if _session is not None:
         return _session
 
-    email = os.getenv("SCREENER_EMAIL")
+    email    = os.getenv("SCREENER_EMAIL")
     password = os.getenv("SCREENER_PASSWORD")
 
     if not email or not password:
@@ -115,7 +119,7 @@ def _get_authenticated_session() -> requests.Session:
     return _session
 
 
-def _fetch_page(ticker: str) -> tuple[BeautifulSoup, bool]:
+def _fetch_page(ticker: str) -> tuple[BeautifulSoup, bool, str]:
     """
     Fetches the Screener.in company page for the given ticker.
 
@@ -126,12 +130,13 @@ def _fetch_page(ticker: str) -> tuple[BeautifulSoup, bool]:
         ticker: NSE/BSE stock symbol, e.g. "RELIANCE"
 
     Returns:
-        A tuple of (BeautifulSoup, is_consolidated) where is_consolidated
-        is True if the consolidated page was used, False for standalone.
+        A tuple of (BeautifulSoup, is_consolidated, company_id) where
+        is_consolidated is True if the consolidated page was used, and
+        company_id is Screener's internal integer ID (needed for schedule API).
 
     Raises:
         ValueError: if the ticker is not found on Screener.in (HTTP 404).
-        RuntimeError: if authentication fails.
+        RuntimeError: if authentication fails or company_id cannot be found.
     """
     session = _get_authenticated_session()
 
@@ -159,11 +164,99 @@ def _fetch_page(ticker: str) -> tuple[BeautifulSoup, bool]:
         if is_consolidated and no_consolidated:
             continue  # retry with standalone
 
-        return soup, is_consolidated
+        # Extract Screener's internal company ID from the data attribute.
+        # This is required to call the schedule sub-row API.
+        company_div = soup.find(attrs={"data-company-id": True})
+        if not company_div:
+            raise RuntimeError(
+                f"Could not find data-company-id attribute for ticker '{ticker}'. "
+                "Screener.in page structure may have changed."
+            )
+        company_id = company_div["data-company-id"]
+
+        return soup, is_consolidated, company_id
 
     raise ValueError(
         f"Could not load any page for ticker '{ticker}' on Screener.in."
     )
+
+
+def _fetch_schedule(
+    company_id: str,
+    parent: str,
+    section: str,
+    is_consolidated: bool,
+) -> dict[str, dict[str, str]]:
+    """
+    Calls Screener's schedule sub-row API to fetch granular line items
+    hidden behind expandable '+' buttons on the company page.
+
+    The API returns a JSON object mapping row label → {period: value_str}.
+    Example: {"Inventories": {"Mar 2024": "152,770", ...}, ...}
+
+    Args:
+        company_id:     Screener's internal company ID (from data-company-id).
+        parent:         Parent row label, e.g. "Other Assets", "Fixed Assets".
+        section:        Section name, e.g. "balance-sheet", "cash-flow".
+        is_consolidated: Whether to request consolidated data.
+
+    Returns:
+        Dict mapping sub-row label to a period→value_string dict.
+        Returns empty dict if the API returns a non-200 response (graceful
+        degradation — sub-rows are enrichment, not required data).
+    """
+    session = _get_authenticated_session()
+    params: dict[str, str] = {"parent": parent, "section": section}
+    if is_consolidated:
+        params["consolidated"] = ""
+
+    time.sleep(REQUEST_DELAY_SECONDS)
+    resp = session.get(
+        SCHEDULE_URL.format(company_id=company_id),
+        params=params,
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        return {}
+    try:
+        return resp.json()
+    except Exception:
+        return {}
+
+
+def _schedule_series(
+    schedule_data: dict[str, dict[str, str]],
+    row_label: str,
+    years: list[str],
+) -> list[float | None]:
+    """
+    Extracts a time-series list from a schedule API response, aligned to
+    the given year/period headers.
+
+    Args:
+        schedule_data: Dict returned by _fetch_schedule.
+        row_label:     The sub-row label to extract (case-insensitive prefix).
+        years:         List of period strings to align to (e.g. ["Mar 2024", ...]).
+
+    Returns:
+        List of float | None values aligned to years. Returns list of None
+        values if the row_label is not found in schedule_data.
+    """
+    label_lower = row_label.lower()
+    data: dict[str, str] = {}
+    for key, val in schedule_data.items():
+        if key.lower().startswith(label_lower):
+            data = val
+            break
+
+    if not data:
+        return [None] * len(years)
+
+    result = []
+    for yr in years:
+        raw = data.get(yr, "")
+        result.append(_parse_number_or_none(raw))
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -174,14 +267,14 @@ def _fetch_page(ticker: str) -> tuple[BeautifulSoup, bool]:
 # These are fixed for Indian companies on Screener.in — always INR.
 _HEADER_UNITS: dict[str, str] = {
     "current_price":    "INR",
-    "market_cap":       "INR_Cr",   # INR Crores
+    "market_cap":       "INR_Cr",
     "high_52w":         "INR",
     "low_52w":          "INR",
     "book_value":       "INR",
     "face_value":       "INR",
     "dividend_yield":   "%",
     "price_change_pct": "%",
-    "pe":               "x",        # dimensionless multiple
+    "pe":               "x",
     "roce":             "%",
     "roe":              "%",
     "debt_to_equity":   "x",
@@ -212,7 +305,6 @@ def _parse_number(text: str, field: str, ticker: str) -> float:
         ValueError: if the string is empty/dash or cannot be parsed as a number.
     """
     cleaned = text.replace(",", "").replace("%", "").replace("₹", "").strip()
-    # Convert "(12.3)" to "-12.3"
     cleaned = re.sub(r"^\((.+)\)$", r"-\1", cleaned)
     if cleaned in ("", "-", "--", "—"):
         raise ValueError(
@@ -232,12 +324,11 @@ def _parse_number_or_none(text: str) -> float | None:
     """
     Parses a number string, returning None if the cell is empty or a dash.
 
-    Used for time-series table rows where some columns (e.g. TTM) may be
-    blank because Screener hasn't computed the value yet. This is not a
-    scraping failure — it is a legitimate data gap.
+    Used for time-series table rows where some columns may be blank because
+    Screener hasn't computed the value yet.
 
     Args:
-        text: Raw string from the HTML cell.
+        text: Raw string from the HTML cell or API response.
 
     Returns:
         Parsed float, or None if the cell is empty/dash.
@@ -339,27 +430,18 @@ def _extract_section_units(section: BeautifulSoup, ticker: str) -> dict:
     """
     Extracts the scale and currency from a section's subtitle paragraph.
 
-    Screener.in renders a line like:
-        "Consolidated Figures in Rs. Crores"
-    or  "Standalone Figures in Rs. Crores"
+    Screener.in renders a line like "Consolidated Figures in Rs. Crores"
     inside a <p class="sub"> at the top of each financial table section.
 
-    This is parsed to produce a units dict that downstream consumers (e.g.
-    the LLM prompt, the frontend) can use to correctly interpret numbers.
-
     Args:
-        section: BeautifulSoup element for the section (e.g. section#profit-loss).
+        section: BeautifulSoup element for the section.
         ticker:  Ticker symbol used in error messages.
 
     Returns:
-        dict with keys:
-            scale    (str) — "Cr" for Crores, "L" for Lakhs, or the raw token
-                             if an unrecognised scale is found.
-            currency (str) — "INR" when "Rs." is found; raw token otherwise.
+        dict with keys: scale (str) — "Cr" or "L"; currency (str) — "INR".
 
     Raises:
-        ValueError: if the <p class="sub"> subtitle paragraph is missing entirely,
-                    which would mean Screener.in has changed its page structure.
+        ValueError: if the <p class="sub"> subtitle paragraph is missing.
     """
     sub_p = section.select_one("p.sub")
     if not sub_p:
@@ -369,27 +451,20 @@ def _extract_section_units(section: BeautifulSoup, ticker: str) -> dict:
             "Screener.in page structure may have changed."
         )
 
-    # The first NavigableString child contains the full unit text plus a trailing " / "
-    # separator before the "View Standalone" link, e.g.:
-    #   "Consolidated Figures in Rs. Crores\n        /\n        "
-    # Split on "/" and take the part before it.
     first_text_node = next(
         (str(node) for node in sub_p.children if isinstance(node, NavigableString)),
         "",
     )
     raw_text = first_text_node.split("/")[0].strip()
 
-    # Determine currency — "Rs." indicates Indian Rupees → INR
     currency = "INR" if "rs." in raw_text.lower() else raw_text
 
-    # Determine scale — "Crores" → "Cr", "Lakhs" → "L"
     text_lower = raw_text.lower()
     if "crore" in text_lower:
         scale = "Cr"
     elif "lakh" in text_lower:
         scale = "L"
     else:
-        # Capture whatever unit token follows "in" (e.g. "in Millions")
         parts = text_lower.split()
         in_idx = next((i for i, p in enumerate(parts) if p == "in"), -1)
         scale = parts[in_idx + 1] if in_idx >= 0 and in_idx + 1 < len(parts) else "unknown"
@@ -424,7 +499,6 @@ def _get_company_header(soup: BeautifulSoup, ticker: str) -> dict:
     Raises:
         ValueError: if any required field cannot be extracted.
     """
-    # Company name
     name_tag = soup.find("h1")
     if not name_tag:
         raise ValueError(
@@ -433,7 +507,6 @@ def _get_company_header(soup: BeautifulSoup, ticker: str) -> dict:
         )
     name = name_tag.get_text(strip=True)
 
-    # Sector — from the peer comparison breadcrumb, not the empty div.breadcrumb
     sector_tag = soup.select_one('section#peers p.sub a[title="Sector"]')
     if not sector_tag:
         raise ValueError(
@@ -442,7 +515,6 @@ def _get_company_header(soup: BeautifulSoup, ticker: str) -> dict:
         )
     sector = sector_tag.get_text(strip=True)
 
-    # div#top is the main card container for all header data
     top_div = soup.find("div", id="top")
     if not top_div:
         raise ValueError(
@@ -450,10 +522,6 @@ def _get_company_header(soup: BeautifulSoup, ticker: str) -> dict:
             "Screener.in page structure may have changed."
         )
 
-    # BSE and NSE codes from company-links anchors inside div#top.
-    # The anchor contains an <i> icon and a <span> with the code text.
-    # e.g. <span class="ink-700 upper">BSE:\n            500325</span>
-    # We grab the span text and take the last whitespace token (the actual code).
     bse_code: str | None = None
     nse_code: str | None = None
     for a in top_div.select(".company-links a"):
@@ -461,10 +529,9 @@ def _get_company_header(soup: BeautifulSoup, ticker: str) -> dict:
         span = a.find("span")
         if not span:
             continue
-        # span text is like "BSE:\n            500325" or "NSE:\n            RELIANCE"
         tokens = span.get_text().split()
         if len(tokens) >= 2:
-            code = tokens[-1]  # last token is always the actual code/symbol
+            code = tokens[-1]
         else:
             continue
         if "bseindia" in href:
@@ -472,7 +539,6 @@ def _get_company_header(soup: BeautifulSoup, ticker: str) -> dict:
         elif "nseindia" in href:
             nse_code = code
 
-    # Current price — inside the font-size-18 div in div#top, first span
     price_div = top_div.select_one("div.font-size-18")
     if not price_div:
         raise ValueError(
@@ -486,7 +552,6 @@ def _get_company_header(soup: BeautifulSoup, ticker: str) -> dict:
         )
     current_price = _parse_number(price_span.get_text(), "current_price", ticker)
 
-    # Price change % — span.up (green) or span.down (red) inside div#top
     change_tag = top_div.select_one("span.up, span.down")
     if not change_tag:
         raise ValueError(
@@ -495,7 +560,6 @@ def _get_company_header(soup: BeautifulSoup, ticker: str) -> dict:
         )
     price_change_pct = _parse_number(change_tag.get_text(), "price_change_pct", ticker)
 
-    # ul#top-ratios contains Market Cap, High/Low, Stock P/E, Book Value, etc.
     ratios_ul = soup.find("ul", id="top-ratios")
     if not ratios_ul:
         raise ValueError(
@@ -503,11 +567,9 @@ def _get_company_header(soup: BeautifulSoup, ticker: str) -> dict:
             "Screener.in page structure may have changed."
         )
 
-    # Build a name → number map from the list items
     ratio_map: dict[str, str] = {}
     for li in ratios_ul.find_all("li"):
         name_span = li.find("span", class_="name")
-        # High/Low has two .number spans — take first for high, second for low
         number_spans = li.find_all("span", class_="number")
         if name_span and number_spans:
             key = name_span.get_text(strip=True).lower()
@@ -516,7 +578,6 @@ def _get_company_header(soup: BeautifulSoup, ticker: str) -> dict:
                 ratio_map[key + "_low"] = number_spans[1].get_text(strip=True)
 
     def _r(key: str, field: str) -> float:
-        """Lookup ratio by partial key match, raise if missing."""
         for k, v in ratio_map.items():
             if key.lower() in k:
                 return _parse_number(v, field, ticker)
@@ -525,13 +586,13 @@ def _get_company_header(soup: BeautifulSoup, ticker: str) -> dict:
             "Screener.in page structure may have changed."
         )
 
-    market_cap    = _r("market cap", "market_cap")
-    high_52w      = _r("high / low", "high_52w")
-    low_52w       = _parse_number(
+    market_cap     = _r("market cap", "market_cap")
+    high_52w       = _r("high / low", "high_52w")
+    low_52w        = _parse_number(
         ratio_map.get("high / low_low", ""),
         "low_52w", ticker
     ) if "high / low_low" in ratio_map else _r("low", "low_52w")
-    face_value    = _r("face value", "face_value")
+    face_value     = _r("face value", "face_value")
     dividend_yield = _r("dividend yield", "dividend_yield")
 
     return {
@@ -551,27 +612,22 @@ def _get_company_header(soup: BeautifulSoup, ticker: str) -> dict:
 
 def _get_key_ratios(soup: BeautifulSoup, ticker: str) -> dict:
     """
-    Extracts headline valuation and return ratios.
+    Extracts headline valuation and return ratios from ul#top-ratios.
 
-    PE, Book Value, ROCE, ROE come from ul#top-ratios (always present).
-    Debt/Equity and Current Ratio are pulled from the latest year column
-    of section#ratios table — they are None when Screener does not publish
-    them for a particular company (e.g. conglomerates like Reliance where
-    these metrics are not applicable or not shown).
+    PE, Book Value, ROCE, ROE always present. Debt/Equity and Current Ratio
+    pulled from the latest column of section#ratios — None when absent.
 
     Args:
         soup:   Parsed HTML of the Screener company page.
         ticker: Ticker symbol used in error messages.
 
     Returns:
-        dict with keys: pe, book_value, roce, roe (all float),
+        dict with keys: pe, book_value, roce, roe (float),
         debt_to_equity, current_ratio (float or None).
 
     Raises:
-        ValueError: if the ul#top-ratios panel or section#ratios is missing,
-                    or if a present ratio value cannot be parsed.
+        ValueError: if the panels are missing or values cannot be parsed.
     """
-    # Pull PE, Book Value, ROCE, ROE from ul#top-ratios
     ratios_ul = soup.find("ul", id="top-ratios")
     if not ratios_ul:
         raise ValueError(
@@ -600,9 +656,6 @@ def _get_key_ratios(soup: BeautifulSoup, ticker: str) -> dict:
     roce       = _top("roce", "roce")
     roe        = _top("roe", "roe")
 
-    # Debt/Equity and Current Ratio: pulled from section#ratios table.
-    # These rows are absent for some companies — None means Screener does
-    # not publish the metric, not a scraping failure.
     ratios_section = soup.find("section", id="ratios")
     if not ratios_section:
         raise ValueError(
@@ -612,11 +665,10 @@ def _get_key_ratios(soup: BeautifulSoup, ticker: str) -> dict:
     ratios_rows = _extract_table_rows(ratios_section, "ratios", ticker)
 
     def _optional_latest(label: str, field: str) -> float | None:
-        """Return latest value for a row, or None if the row doesn't exist."""
         label_lower = label.lower()
         for key, values in ratios_rows.items():
             if key.lower().startswith(label_lower):
-                return _parse_number(values[-1], field, ticker)
+                return _parse_number_or_none(values[-1])
         return None
 
     debt_to_equity = _optional_latest("Debt to Equity", "debt_to_equity")
@@ -637,16 +689,16 @@ def _get_pl_table(soup: BeautifulSoup, ticker: str) -> dict:
     Extracts the annual Profit & Loss statement (10 years + TTM).
 
     Captures: Sales, Operating Profit, OPM %, Other Income, Interest,
-    Depreciation, Net Profit, EPS, Dividend Payout %.
+    Depreciation, Net Profit, EPS, Dividend Payout %, Tax %.
 
     Args:
         soup:   Parsed HTML of the Screener company page.
         ticker: Ticker symbol used in error messages.
 
     Returns:
-        dict with keys: years (list[str]), sales, operating_profit,
-        opm_pct, other_income, interest, depreciation, net_profit,
-        eps, dividend_payout_pct — each a list[float] aligned to years.
+        dict with keys: units, years, sales, operating_profit, opm_pct,
+        other_income, interest, depreciation, net_profit, eps,
+        dividend_payout_pct, tax_pct — each a list[float|None].
 
     Raises:
         ValueError: if the section or any required row is missing.
@@ -666,11 +718,6 @@ def _get_pl_table(soup: BeautifulSoup, ticker: str) -> dict:
         )
 
     def _row(label: str) -> list[float | None]:
-        """
-        Returns a time-series list for a P&L row. Individual cells may be
-        None when Screener has not computed the value for that period (e.g.
-        TTM column for dividend payout). The row itself must exist.
-        """
         raw = _require_row(rows, label, "profit-loss", ticker)
         return [_parse_number_or_none(v) for v in raw[: len(years)]]
 
@@ -686,6 +733,7 @@ def _get_pl_table(soup: BeautifulSoup, ticker: str) -> dict:
         "net_profit":          _row("Net Profit"),
         "eps":                 _row("EPS"),
         "dividend_payout_pct": _row("Dividend Payout"),
+        "tax_pct":             _row("Tax %"),
     }
 
 
@@ -716,7 +764,6 @@ def _get_growth_rates(soup: BeautifulSoup, ticker: str) -> dict:
             f"Could not find section#profit-loss for ticker '{ticker}'."
         )
 
-    # Growth data lives in table.ranges-table elements, NOT div.sub
     ranges_tables = section.find_all("table", class_="ranges-table")
     if len(ranges_tables) < 2:
         raise ValueError(
@@ -726,7 +773,6 @@ def _get_growth_rates(soup: BeautifulSoup, ticker: str) -> dict:
         )
 
     def _find_table(header_text: str) -> BeautifulSoup:
-        """Find the ranges-table whose th text matches header_text."""
         for t in ranges_tables:
             th = t.find("th")
             if th and header_text.lower() in th.get_text(strip=True).lower():
@@ -737,10 +783,6 @@ def _get_growth_rates(soup: BeautifulSoup, ticker: str) -> dict:
         )
 
     def _parse_ranges(table: BeautifulSoup, label: str) -> dict[str, float]:
-        """
-        Parse a ranges-table into {period_key: float} dict.
-        Row format: <td>10 Years:</td><td>10%</td>
-        """
         result: dict[str, float] = {}
         for tr in table.find_all("tr"):
             cells = tr.find_all("td")
@@ -775,19 +817,34 @@ def _get_growth_rates(soup: BeautifulSoup, ticker: str) -> dict:
     }
 
 
-def _get_balance_sheet(soup: BeautifulSoup, ticker: str) -> dict:
+def _get_balance_sheet(
+    soup: BeautifulSoup,
+    ticker: str,
+    company_id: str,
+    is_consolidated: bool,
+) -> dict:
     """
-    Extracts the annual Balance Sheet (10 years).
+    Extracts the annual Balance Sheet (10 years) plus sub-row schedules.
 
-    Captures: Equity Capital, Reserves, Borrowings, Fixed Assets, CWIP,
-    Investments, Other Assets, Total Assets.
+    Base rows: Equity Capital, Reserves, Borrowings, Other Liabilities,
+    Total Liabilities, Fixed Assets, CWIP, Investments, Other Assets,
+    Total Assets.
+
+    Schedule sub-rows (fetched via API):
+    - Other Assets schedule: Inventories, Trade Receivables, Cash Equivalents
+    - Other Liabilities schedule: Trade Payables
+    - Borrowings schedule: Long Term Borrowings, Short Term Borrowings
+    - Fixed Assets schedule: Gross Block, Accumulated Depreciation
 
     Args:
-        soup:   Parsed HTML of the Screener company page.
-        ticker: Ticker symbol used in error messages.
+        soup:           Parsed HTML of the Screener company page.
+        ticker:         Ticker symbol used in error messages.
+        company_id:     Screener internal company ID for the schedule API.
+        is_consolidated: Whether to request consolidated schedule data.
 
     Returns:
-        dict with keys: years (list[str]) and one list[float] per line item.
+        dict with keys: units, years, and one list[float|None] per line item.
+        Schedule fields are also lists aligned to the same years list.
 
     Raises:
         ValueError: if the section or any required row is missing.
@@ -810,34 +867,73 @@ def _get_balance_sheet(soup: BeautifulSoup, ticker: str) -> dict:
         raw = _require_row(rows, label, "balance-sheet", ticker)
         return [_parse_number_or_none(v) for v in raw[: len(years)]]
 
+    # Fetch schedule sub-rows via API
+    other_assets_sched = _fetch_schedule(company_id, "Other Assets",      "balance-sheet", is_consolidated)
+    other_liab_sched   = _fetch_schedule(company_id, "Other Liabilities",  "balance-sheet", is_consolidated)
+    borrowings_sched   = _fetch_schedule(company_id, "Borrowings",         "balance-sheet", is_consolidated)
+    fixed_assets_sched = _fetch_schedule(company_id, "Fixed Assets",       "balance-sheet", is_consolidated)
+
+    def _sched(sched_data: dict, label: str) -> list[float | None]:
+        return _schedule_series(sched_data, label, years)
+
     return {
-        "units":          _extract_section_units(section, ticker),
-        "years":          years,
-        "equity_capital": _row("Equity Capital"),
-        "reserves":       _row("Reserves"),
-        "borrowings":     _row("Borrowings"),
-        "fixed_assets":   _row("Fixed Assets"),
-        "cwip":           _row("CWIP"),
-        "investments":    _row("Investments"),
-        "other_assets":   _row("Other Assets"),
-        "total_assets":   _row("Total Assets"),
+        "units":                  _extract_section_units(section, ticker),
+        "years":                  years,
+        # Base balance sheet rows
+        "equity_capital":         _row("Equity Capital"),
+        "reserves":               _row("Reserves"),
+        "borrowings":             _row("Borrowings"),
+        "other_liabilities":      _row("Other Liabilities"),
+        "total_liabilities":      _row("Total Liabilities"),
+        "fixed_assets":           _row("Fixed Assets"),
+        "cwip":                   _row("CWIP"),
+        "investments":            _row("Investments"),
+        "other_assets":           _row("Other Assets"),
+        "total_assets":           _row("Total Assets"),
+        # Other Assets schedule: current asset components
+        "inventories":            _sched(other_assets_sched, "Inventories"),
+        "trade_receivables":      _sched(other_assets_sched, "Trade receivables"),
+        "cash_equivalents":       _sched(other_assets_sched, "Cash Equivalents"),
+        # Other Liabilities schedule: current liability component
+        "trade_payables":         _sched(other_liab_sched, "Trade Payables"),
+        # Borrowings schedule: debt structure
+        "long_term_borrowings":   _sched(borrowings_sched, "Long term Borrowings"),
+        "short_term_borrowings":  _sched(borrowings_sched, "Short term Borrowings"),
+        # Fixed Assets schedule: gross/net block
+        "gross_block":            _sched(fixed_assets_sched, "Gross Block"),
+        "accumulated_depreciation": _sched(fixed_assets_sched, "Accumulated Depreciation"),
     }
 
 
-def _get_cash_flow(soup: BeautifulSoup, ticker: str) -> dict:
+def _get_cash_flow(
+    soup: BeautifulSoup,
+    ticker: str,
+    company_id: str,
+    is_consolidated: bool,
+) -> dict:
     """
-    Extracts the annual Cash Flow statement (10 years).
+    Extracts the annual Cash Flow statement (10 years) plus investing
+    sub-row schedule to get explicit CapEx.
 
-    Captures: Cash from Operating, Investing, Financing activities
-    and Net Cash Flow.
+    Base rows: Cash from Operating, Investing, Financing, Net Cash Flow.
+
+    Schedule sub-rows (fetched via API):
+    - Investing schedule: Fixed Assets Purchased (CapEx), Fixed Assets Sold,
+      Investments Purchased, Investments Sold
+
+    CapEx = Fixed assets purchased (sign-adjusted — Screener reports it as
+    negative outflow, so we store as-is; signals.py interprets the sign).
 
     Args:
-        soup:   Parsed HTML of the Screener company page.
-        ticker: Ticker symbol used in error messages.
+        soup:           Parsed HTML of the Screener company page.
+        ticker:         Ticker symbol used in error messages.
+        company_id:     Screener internal company ID for the schedule API.
+        is_consolidated: Whether to request consolidated schedule data.
 
     Returns:
-        dict with keys: years (list[str]), operating, investing,
-        financing, net_cash_flow — each a list[float].
+        dict with keys: units, years, operating, investing, financing,
+        net_cash_flow, capex (negative = outflow), fixed_assets_sold,
+        investments_purchased, investments_sold.
 
     Raises:
         ValueError: if the section or any required row is missing.
@@ -860,13 +956,24 @@ def _get_cash_flow(soup: BeautifulSoup, ticker: str) -> dict:
         raw = _require_row(rows, label, "cash-flow", ticker)
         return [_parse_number_or_none(v) for v in raw[: len(years)]]
 
+    # Fetch investing sub-schedule for explicit CapEx
+    investing_sched = _fetch_schedule(company_id, "Cash from Investing Activity", "cash-flow", is_consolidated)
+
+    def _sched(label: str) -> list[float | None]:
+        return _schedule_series(investing_sched, label, years)
+
     return {
-        "units":         _extract_section_units(section, ticker),
-        "years":         years,
-        "operating":     _row("Cash from Operating"),
-        "investing":     _row("Cash from Investing"),
-        "financing":     _row("Cash from Financing"),
-        "net_cash_flow": _row("Net Cash Flow"),
+        "units":                  _extract_section_units(section, ticker),
+        "years":                  years,
+        "operating":              _row("Cash from Operating"),
+        "investing":              _row("Cash from Investing"),
+        "financing":              _row("Cash from Financing"),
+        "net_cash_flow":          _row("Net Cash Flow"),
+        # CapEx: "Fixed assets purchased" — negative value means cash outflow
+        "capex":                  _sched("Fixed assets purchased"),
+        "fixed_assets_sold":      _sched("Fixed assets sold"),
+        "investments_purchased":  _sched("Investments purchased"),
+        "investments_sold":       _sched("Investments sold"),
     }
 
 
@@ -882,7 +989,7 @@ def _get_ratios_table(soup: BeautifulSoup, ticker: str) -> dict:
         ticker: Ticker symbol used in error messages.
 
     Returns:
-        dict with keys: years (list[str]) and one list[float] per ratio.
+        dict with keys: units, years, and one list[float|None] per ratio.
 
     Raises:
         ValueError: if the section or any required row is missing.
@@ -913,7 +1020,7 @@ def _get_ratios_table(soup: BeautifulSoup, ticker: str) -> dict:
         "days_payable":          _row("Days Payable"),
         "cash_conversion_cycle": _row("Cash Conversion Cycle"),
         "working_capital_days":  _row("Working Capital Days"),
-        "roce":                  _row("ROCE"),   # matches "ROCE %" via prefix match
+        "roce":                  _row("ROCE"),
     }
 
 
@@ -928,8 +1035,8 @@ def _get_quarterly_results(soup: BeautifulSoup, ticker: str) -> dict:
         ticker: Ticker symbol used in error messages.
 
     Returns:
-        dict with keys: quarters (list[str]), sales, operating_profit,
-        opm_pct, net_profit, eps — each a list[float].
+        dict with keys: quarters (list[str]), units, sales, operating_profit,
+        opm_pct, net_profit, eps — each a list[float|None].
 
     Raises:
         ValueError: if the section or any required row is missing.
@@ -965,22 +1072,28 @@ def _get_quarterly_results(soup: BeautifulSoup, ticker: str) -> dict:
 
 def _get_shareholding(soup: BeautifulSoup, ticker: str) -> dict:
     """
-    Extracts the latest quarter's shareholding pattern.
+    Extracts the shareholding pattern — latest quarter and up to 8 quarters
+    of history for trend analysis.
 
-    Scopes to div#quarterly-shp to avoid picking up the yearly table.
-    Captures Promoter %, FII %, DII %, Public %, and Pledged %.
+    Scopes to div#quarterly-shp. Captures Promoter %, FII %, DII %,
+    Public %, and Pledged % for each quarter.
 
-    Pledged %: returns 0.0 if the row is absent (absence means 0% pledging —
-    Screener only shows this row when pledging exists). Raises if the row
-    is present but the value cannot be parsed.
+    Pledged %: 0.0 when the row is absent (Screener omits it when 0%).
 
     Args:
         soup:   Parsed HTML of the Screener company page.
         ticker: Ticker symbol used in error messages.
 
     Returns:
-        dict with keys: quarter (str), promoter_pct, fii_pct, dii_pct,
-        public_pct, pledged_pct — all floats.
+        dict with keys:
+            quarter (str)        — latest quarter label
+            promoter_pct (float) — latest promoter holding
+            fii_pct (float)      — latest FII holding
+            dii_pct (float)      — latest DII holding
+            public_pct (float)   — latest public holding
+            pledged_pct (float)  — latest pledged % (0.0 if absent)
+            history (dict)       — {quarter_label: {promoter, fii, dii, public, pledged}}
+                                   for all available quarters, newest-first
 
     Raises:
         ValueError: if the section or any required row is missing.
@@ -992,7 +1105,6 @@ def _get_shareholding(soup: BeautifulSoup, ticker: str) -> dict:
             "Screener.in page structure may have changed."
         )
 
-    # Scope to quarterly tab only — avoids confusion with the yearly table
     quarterly_div = section.find("div", id="quarterly-shp")
     if not quarterly_div:
         raise ValueError(
@@ -1007,32 +1119,45 @@ def _get_shareholding(soup: BeautifulSoup, ticker: str) -> dict:
             f"Could not extract quarter headers from shareholding table for ticker '{ticker}'."
         )
 
+    latest_idx = -1
     latest_quarter = quarters[-1]
-    idx = -1  # latest quarter is the last column
 
-    def _pct(label: str) -> float:
+    def _pct(label: str) -> list[float | None]:
+        """Return full time-series for a shareholding row."""
         raw = _require_row(rows, label, "shareholding", ticker)
-        return _parse_number(raw[idx], label, ticker)
+        return [_parse_number_or_none(v) for v in raw[: len(quarters)]]
 
-    promoter_pct = _pct("Promoters")
-    fii_pct      = _pct("FIIs")
-    dii_pct      = _pct("DIIs")
-    public_pct   = _pct("Public")
+    promoter_series = _pct("Promoters")
+    fii_series      = _pct("FIIs")
+    dii_series      = _pct("DIIs")
+    public_series   = _pct("Public")
 
-    # Pledged % — row absent means 0.0 (not an error)
-    pledged_pct = 0.0
+    # Pledged % row absent = 0% pledged for all periods
+    pledged_series: list[float | None] = [0.0] * len(quarters)
     for key, values in rows.items():
         if key.lower().startswith("pledged"):
-            pledged_pct = _parse_number(values[idx], "pledged_pct", ticker)
+            pledged_series = [_parse_number_or_none(v) for v in values[: len(quarters)]]
             break
+
+    # Build history dict keyed by quarter label (newest quarter last in list → reverse)
+    history: dict[str, dict] = {}
+    for i, q in enumerate(quarters):
+        history[q] = {
+            "promoter_pct": promoter_series[i],
+            "fii_pct":      fii_series[i],
+            "dii_pct":      dii_series[i],
+            "public_pct":   public_series[i],
+            "pledged_pct":  pledged_series[i] if pledged_series[i] is not None else 0.0,
+        }
 
     return {
         "quarter":      latest_quarter,
-        "promoter_pct": promoter_pct,
-        "fii_pct":      fii_pct,
-        "dii_pct":      dii_pct,
-        "public_pct":   public_pct,
-        "pledged_pct":  pledged_pct,
+        "promoter_pct": promoter_series[latest_idx] or 0.0,
+        "fii_pct":      fii_series[latest_idx]      or 0.0,
+        "dii_pct":      dii_series[latest_idx]      or 0.0,
+        "public_pct":   public_series[latest_idx]   or 0.0,
+        "pledged_pct":  pledged_series[latest_idx]  if pledged_series[latest_idx] is not None else 0.0,
+        "history":      history,
     }
 
 
@@ -1040,18 +1165,12 @@ def _get_pros_cons(soup: BeautifulSoup, ticker: str) -> dict:
     """
     Extracts Screener's machine-generated Pros and Cons lists.
 
-    The container divs (div.pros, div.cons) must be present — their absence
-    means the section is missing entirely and is a scraping failure.
-    An empty list inside the container is valid (Screener may not have
-    generated items yet for this stock).
-
     Args:
         soup:   Parsed HTML of the Screener company page.
         ticker: Ticker symbol used in error messages.
 
     Returns:
         dict with keys: pros (list[str]), cons (list[str]).
-        Either list may be empty if Screener hasn't generated items.
 
     Raises:
         ValueError: if div.pros or div.cons container is not found.
@@ -1087,7 +1206,8 @@ def fetch_company_data(ticker: str) -> dict:
 
     This is the only function external modules should call. It orchestrates
     all private helpers, tries consolidated financials first, and falls back
-    to standalone if needed.
+    to standalone if needed. Includes schedule sub-row API calls for granular
+    line items (CapEx, inventories, trade payables, etc.).
 
     Every field in the output is guaranteed to be present and fully populated.
     If any field cannot be extracted, this function raises immediately with a
@@ -1100,18 +1220,24 @@ def fetch_company_data(ticker: str) -> dict:
     Returns:
         dict with keys:
             is_consolidated (bool)
-            currency (str)       — top-level currency code, e.g. "INR"
-            header (dict)        — name, sector, codes, price, market cap, etc.
-            header_units (dict)  — unit per header/key_ratios field (e.g. "INR", "%", "x")
-            key_ratios (dict)    — pe, book_value, roce, roe, debt_to_equity, current_ratio
-            pl_table (dict)      — 10-year annual P&L; includes "units" key
-            growth_rates (dict)  — sales and profit CAGR at 3/5/10yr and TTM (always %)
-            balance_sheet (dict) — 10-year annual balance sheet; includes "units" key
-            cash_flow (dict)     — 10-year annual cash flow; includes "units" key
-            ratios_table (dict)  — 10-year efficiency ratios; includes "units" key
-            quarterly (dict)     — recent quarterly results; includes "units" key
-            shareholding (dict)  — latest quarter shareholding pattern (always %)
-            pros_cons (dict)     — Screener's generated pros and cons
+            currency (str)
+            header (dict)         — name, sector, codes, price, market cap, etc.
+            header_units (dict)   — unit per header/key_ratios field
+            key_ratios (dict)     — pe, book_value, roce, roe, debt_to_equity,
+                                    current_ratio
+            pl_table (dict)       — 10-year annual P&L + tax_pct
+            growth_rates (dict)   — sales and profit CAGR at 3/5/10yr and TTM
+            balance_sheet (dict)  — 10-year balance sheet + inventories,
+                                    trade_receivables, cash_equivalents,
+                                    trade_payables, long/short_term_borrowings,
+                                    gross_block, accumulated_depreciation
+            cash_flow (dict)      — 10-year cash flow + capex,
+                                    fixed_assets_sold, investments_purchased,
+                                    investments_sold
+            ratios_table (dict)   — 10-year efficiency ratios
+            quarterly (dict)      — recent quarterly results
+            shareholding (dict)   — latest + full history of shareholding pattern
+            pros_cons (dict)      — Screener's generated pros and cons
 
     Raises:
         ValueError:  if ticker not found or any required field is missing.
@@ -1120,18 +1246,15 @@ def fetch_company_data(ticker: str) -> dict:
     """
     ticker = ticker.strip().upper()
 
-    soup, is_consolidated = _fetch_page(ticker)
+    soup, is_consolidated, company_id = _fetch_page(ticker)
 
-    # Derive top-level currency from the first financial section's unit subtitle.
-    # All sections on the same page share the same currency (always INR for Indian
-    # companies on Screener.in), so reading once from profit-loss is sufficient.
     pl_section = soup.find("section", id="profit-loss")
     if not pl_section:
         raise ValueError(
             f"Could not find section#profit-loss to determine currency for ticker '{ticker}'."
         )
-    pl_units = _extract_section_units(pl_section, ticker)
-    top_currency = pl_units["currency"]   # "INR" for Indian companies
+    pl_units     = _extract_section_units(pl_section, ticker)
+    top_currency = pl_units["currency"]
 
     return {
         "is_consolidated": is_consolidated,
@@ -1141,8 +1264,8 @@ def fetch_company_data(ticker: str) -> dict:
         "key_ratios":      _get_key_ratios(soup, ticker),
         "pl_table":        _get_pl_table(soup, ticker),
         "growth_rates":    _get_growth_rates(soup, ticker),
-        "balance_sheet":   _get_balance_sheet(soup, ticker),
-        "cash_flow":       _get_cash_flow(soup, ticker),
+        "balance_sheet":   _get_balance_sheet(soup, ticker, company_id, is_consolidated),
+        "cash_flow":       _get_cash_flow(soup, ticker, company_id, is_consolidated),
         "ratios_table":    _get_ratios_table(soup, ticker),
         "quarterly":       _get_quarterly_results(soup, ticker),
         "shareholding":    _get_shareholding(soup, ticker),

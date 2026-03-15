@@ -124,7 +124,8 @@ def _compute_piotroski(data):
     - balance_sheet.total_assets[0/1] this/last year total assets
     - cash_flow.operating[0]          this year operating cash flow
     - balance_sheet.borrowings[0/1]   this/last year debt
-    - key_ratios.current_ratio        latest current ratio (single value)
+    - balance_sheet.other_assets[0/1] / other_liabilities[0/1] -- YoY current ratio
+    - key_ratios.current_ratio        fallback if schedule data absent
     - pl_table.eps[0/1]               this/last year EPS (dilution proxy)
     - pl_table.opm_pct[0/1]           operating margin proxy for gross margin
     - pl_table.sales[0/1]             for asset turnover computation
@@ -181,14 +182,27 @@ def _compute_piotroski(data):
     else:
         signals["leverage_decreasing"] = None
 
-    # F6: Current ratio > 1.0 (liquidity adequate)
-    # key_ratios.current_ratio is only the latest point -- no prior year available.
-    # Using > 1.0 as threshold rather than YoY comparison (documented approximation).
-    cr = kr.get("current_ratio")
-    if cr is not None:
-        signals["current_ratio_improving"] = 1 if cr > 1.0 else 0
+    # F6: Current ratio improving YoY.
+    # Current ratio = other_assets / other_liabilities (both now available as
+    # time series from the balance sheet schedule API). Falls back to the single
+    # key_ratios.current_ratio > 1.0 threshold if schedule data is absent.
+    oa0 = _safe(bs.get("other_assets"), 0)
+    oa1 = _safe(bs.get("other_assets"), 1)
+    ol0 = _safe(bs.get("other_liabilities"), 0)
+    ol1 = _safe(bs.get("other_liabilities"), 1)
+
+    if (oa0 is not None and ol0 is not None and ol0 > 0 and
+            oa1 is not None and ol1 is not None and ol1 > 0):
+        cr0 = oa0 / ol0
+        cr1 = oa1 / ol1
+        signals["current_ratio_improving"] = 1 if cr0 > cr1 else 0
     else:
-        signals["current_ratio_improving"] = None
+        # Fallback: single point from key_ratios, use > 1.0 threshold
+        cr = kr.get("current_ratio")
+        if cr is not None:
+            signals["current_ratio_improving"] = 1 if cr > 1.0 else 0
+        else:
+            signals["current_ratio_improving"] = None
 
     # F7: No share dilution (EPS/NP ratio rising means fewer shares outstanding)
     eps0 = _safe(pl.get("eps"), 0)
@@ -381,7 +395,13 @@ def _compute_earnings_quality(data):
         else:
             result["ocf_to_net_profit"] = round(ocf0 / np0, 3)
 
-        if ocf0 is None or inv0 is None:
+        # FCF = OCF - CapEx. Use explicit capex field (negative = outflow).
+        # Falls back to OCF + investing subtotal if capex schedule unavailable.
+        capex0 = _safe(cf.get("capex"), 0)
+        if capex0 is not None and ocf0 is not None:
+            fcf = ocf0 + capex0  # capex is already negative
+            result["fcf_to_net_profit"] = round(fcf / np0, 3)
+        elif ocf0 is None or inv0 is None:
             result["fcf_to_net_profit_reason"] = "operating or investing cash flow unavailable"
         else:
             result["fcf_to_net_profit"] = round((ocf0 + inv0) / np0, 3)
@@ -704,7 +724,22 @@ def _compute_promoter_risk(data):
     else:
         flag = "high"
 
-    return {"pledged_pct": pledged, "pledge_flag": flag}
+    # Pledging trend: compare latest pledged% vs oldest available in history.
+    # Rising pledging is a red flag even if absolute level is low.
+    pledge_trend = "stable"
+    history = sh.get("history", {})
+    if history:
+        quarters_sorted = list(history.keys())  # in order scraped (oldest first)
+        if len(quarters_sorted) >= 2:
+            oldest_pct = (history[quarters_sorted[0]].get("pledged_pct") or 0.0)
+            latest_pct = pledged
+            diff = latest_pct - oldest_pct
+            if diff > 2.0:
+                pledge_trend = "increasing"
+            elif diff < -2.0:
+                pledge_trend = "decreasing"
+
+    return {"pledged_pct": pledged, "pledge_flag": flag, "pledge_trend": pledge_trend}
 
 
 # ---------------------------------------------------------------------------
