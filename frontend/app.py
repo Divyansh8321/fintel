@@ -1,13 +1,15 @@
 # ============================================================
 # FILE: frontend/app.py
-# PURPOSE: Streamlit UI for Fintel. Phase 5 information-dense
+# PURPOSE: Streamlit UI for Fintel. Phase 6 information-dense
 #          research dashboard: signal panel (Piotroski, DuPont,
 #          Graham Number, DCF valuation, earnings quality,
 #          quarterly momentum), five analyst note panels,
 #          synthesis verdict panel, analyst score comparison
-#          bar chart, recent news, and BSE corporate filings.
+#          bar chart, recent news, BSE corporate filings,
+#          historical consensus score chart, and watchlist.
 # INPUT:   User-entered NSE ticker string
 # OUTPUT:  Full multi-analyst research dashboard + filings panel
+#          + history chart + watchlist management
 # DEPENDS: streamlit, requests, src/api.py running on :8000
 # ============================================================
 
@@ -18,7 +20,65 @@ API_URL = "http://localhost:8000/analyze"
 
 st.set_page_config(page_title="Fintel", page_icon="📈", layout="wide")
 st.title("Fintel — AI Investment Research")
-st.caption("Indian stocks · Screener.in data · GPT-4o multi-analyst engine · Phase 5")
+st.caption("Indian stocks · Screener.in data · GPT-4o multi-analyst engine · Phase 6")
+
+# ---------------------------------------------------------------------------
+# Sidebar — Watchlist panel (Phase 6)
+# ---------------------------------------------------------------------------
+
+with st.sidebar:
+    st.header("Watchlist")
+
+    # Fetch current watchlist from API
+    try:
+        wl_resp = requests.get("http://localhost:8000/watchlist", timeout=5)
+        watchlist = wl_resp.json().get("watchlist", []) if wl_resp.status_code == 200 else []
+    except requests.exceptions.ConnectionError:
+        watchlist = []
+
+    # Display existing watchlist entries with per-ticker remove button
+    if watchlist:
+        for item in watchlist:
+            wl_col1, wl_col2 = st.columns([3, 1])
+            wl_col1.markdown(f"**{item['ticker']}**")
+            if item.get("note"):
+                wl_col1.caption(item["note"])
+            if wl_col2.button("✕", key=f"rm_{item['ticker']}", help=f"Remove {item['ticker']}"):
+                try:
+                    rm_resp = requests.delete(
+                        f"http://localhost:8000/watchlist/{item['ticker']}", timeout=5
+                    )
+                    if rm_resp.status_code == 200:
+                        st.rerun()
+                    else:
+                        st.error(f"Failed to remove {item['ticker']}")
+                except requests.exceptions.ConnectionError:
+                    st.error("API not reachable.")
+    else:
+        st.caption("No tickers yet. Add one below.")
+
+    st.divider()
+
+    # Form to add a new ticker to the watchlist
+    with st.form("add_watchlist_form", clear_on_submit=True):
+        new_ticker = st.text_input("Ticker", placeholder="e.g. INFY").strip().upper()
+        new_note   = st.text_input("Note (optional)", placeholder="e.g. Watch Q3 results")
+        add_submitted = st.form_submit_button("Add to Watchlist")
+
+    if add_submitted and new_ticker:
+        try:
+            add_resp = requests.post(
+                "http://localhost:8000/watchlist",
+                json={"ticker": new_ticker, "note": new_note},
+                timeout=5,
+            )
+            if add_resp.status_code == 200:
+                st.success(f"{new_ticker} added.")
+                st.rerun()
+            else:
+                st.error(f"Failed: {add_resp.text}")
+        except requests.exceptions.ConnectionError:
+            st.error("API not reachable.")
 
 # ---------------------------------------------------------------------------
 # Input row
@@ -435,6 +495,51 @@ else:
                 st.caption("Summary unavailable (image-only PDF or download failed).")
             if f_pdf_url:
                 st.markdown(f"[View PDF on BSE]({f_pdf_url})")
+
+# ---------------------------------------------------------------------------
+# Phase 6 — Historical Score Chart
+# ---------------------------------------------------------------------------
+
+st.divider()
+st.subheader(f"Analysis History — {ticker}")
+
+try:
+    hist_resp = requests.get(f"http://localhost:8000/history/{ticker}", timeout=5)
+    history_runs = hist_resp.json().get("runs", []) if hist_resp.status_code == 200 else []
+except requests.exceptions.ConnectionError:
+    history_runs = []
+
+if history_runs:
+    # Build chart data: date label → consensus score.
+    # Runs arrive newest-first; reverse for chronological chart display.
+    chart_rows = []
+    for run in reversed(history_runs):
+        score = run.get("consensus")
+        if score is not None:
+            # Truncate timestamp to date+time for a readable x-axis label
+            label = run["run_at"][:16].replace("T", " ")
+            chart_rows.append({"date": label, "consensus": score})
+
+    if chart_rows:
+        chart_data = {row["date"]: row["consensus"] for row in chart_rows}
+        st.bar_chart(chart_data, y_label="Consensus Score (1–10)", x_label="Run date (UTC)")
+        st.caption(
+            f"{len(history_runs)} run(s) recorded · latest consensus: "
+            f"{history_runs[0].get('consensus', '—')} · "
+            f"verdict: **{history_runs[0].get('verdict', '—')}**"
+        )
+    else:
+        st.info("Runs recorded but no consensus scores yet.")
+
+    # Expandable table of all runs
+    with st.expander(f"All runs ({len(history_runs)})"):
+        for run in history_runs:
+            cols = st.columns([3, 2, 2])
+            cols[0].write(run["run_at"][:19].replace("T", " ") + " UTC")
+            cols[1].write(f"Score: **{run['consensus'] or '—'}**")
+            cols[2].write(f"Verdict: **{run['verdict'] or '—'}**")
+else:
+    st.info("No history yet for this ticker. Run an analysis to start tracking.")
 
 # ---------------------------------------------------------------------------
 # Raw data expanders — useful for debugging
