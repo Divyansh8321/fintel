@@ -106,6 +106,91 @@ def _pct_change(new_val, old_val):
 
 
 # ---------------------------------------------------------------------------
+# Working capital back-fill helper
+# ---------------------------------------------------------------------------
+
+def _backfill_wc_from_days(data: dict) -> dict:
+    """
+    Derive trade_receivables, inventories, and trade_payables time series
+    from the ratios_table days metrics when the balance sheet schedule rows
+    are all None (e.g. Screener doesn't break them out for some companies).
+
+    Formulas (all values in INR Cr, same scale as sales):
+        trade_receivables = (debtor_days    / 365) * sales
+        inventories       = (inventory_days / 365) * sales
+        trade_payables    = (days_payable   / 365) * sales
+
+    The ratios_table series are newest-first and aligned with the P&L years.
+    Falls back gracefully — returns None lists if days data is also absent.
+
+    Args:
+        data: full dict from fetch_company_data()
+
+    Returns:
+        dict with keys:
+            trade_receivables (list[float|None])
+            inventories       (list[float|None])
+            trade_payables    (list[float|None])
+            wc_source         (str) -- "schedule" | "days_backfill" | "unavailable"
+    """
+    bs = data.get("balance_sheet", {})
+    rt = data.get("ratios_table", {})
+    pl = data.get("pl_table", {})
+
+    # Check if schedule data is genuinely present (at least one non-None value)
+    def _has_data(series):
+        return isinstance(series, list) and any(v is not None for v in series)
+
+    tr_raw = bs.get("trade_receivables", [])
+    inv_raw = bs.get("inventories", [])
+    tp_raw  = bs.get("trade_payables", [])
+
+    # If schedule rows have real data, use them as-is
+    if _has_data(tr_raw) or _has_data(inv_raw) or _has_data(tp_raw):
+        return {
+            "trade_receivables": tr_raw,
+            "inventories":       inv_raw,
+            "trade_payables":    tp_raw,
+            "wc_source":         "schedule",
+        }
+
+    # Back-fill from days ratios + sales
+    sales     = pl.get("sales", [])
+    deb_days  = rt.get("debtor_days", [])
+    inv_days  = rt.get("inventory_days", [])
+    pay_days  = rt.get("days_payable", [])
+
+    n = len(sales)
+
+    def _derive(days_series):
+        """Compute value_series = (days / 365) * sales, element-wise."""
+        result = []
+        for i in range(n):
+            s = _safe(sales, i)
+            d = _safe(days_series, i)
+            if s is not None and d is not None and s > 0 and d >= 0:
+                result.append(round((d / 365.0) * s, 2))
+            else:
+                result.append(None)
+        return result
+
+    if not _has_data(deb_days) and not _has_data(inv_days) and not _has_data(pay_days):
+        return {
+            "trade_receivables": [None] * n,
+            "inventories":       [None] * n,
+            "trade_payables":    [None] * n,
+            "wc_source":         "unavailable",
+        }
+
+    return {
+        "trade_receivables": _derive(deb_days),
+        "inventories":       _derive(inv_days),
+        "trade_payables":    _derive(pay_days),
+        "wc_source":         "days_backfill",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Signal 1: Piotroski F-Score
 # ---------------------------------------------------------------------------
 # Source: Piotroski (2000), "Value Investing: The Use of Historical Financial
@@ -595,10 +680,26 @@ def _compute_balance_sheet_health(data, interest_coverage):
     try:
         de = kr.get("debt_to_equity")
         if de is None:
-            result["debt_to_equity_latest_reason"] = "None -- likely debt-free company"
-            result["debt_to_equity_latest"] = 0.0
-        else:
-            result["debt_to_equity_latest"] = de
+            # Not in scraper (user hasn't added it to quick_ratios).
+            # Compute from balance sheet matching Screener's definition:
+            # Total Debt = long_term_borrowings + short_term_borrowings + lease_liabilities
+            # Equity     = equity_capital + reserves
+            lt   = _safe(bs.get("long_term_borrowings"), 0) or 0
+            st   = _safe(bs.get("short_term_borrowings"), 0) or 0
+            lse  = _safe(bs.get("lease_liabilities"), 0) or 0
+            eq_cap   = _safe(bs.get("equity_capital"), 0)
+            reserves = _safe(bs.get("reserves"), 0)
+            if eq_cap is not None and reserves is not None:
+                total_debt   = lt + st + lse
+                total_equity = eq_cap + reserves
+                if total_equity > 0:
+                    de = round(total_debt / total_equity, 2)
+                    result["debt_to_equity_latest_reason"] = "computed from balance sheet"
+                else:
+                    result["debt_to_equity_latest_reason"] = "total equity <= 0"
+            else:
+                result["debt_to_equity_latest_reason"] = "equity data unavailable"
+        result["debt_to_equity_latest"] = de
 
         b0 = _safe(bs.get("borrowings"), 0)
         b2 = _safe(bs.get("borrowings"), 2)
@@ -1120,6 +1221,16 @@ def compute_signals(data):
             fundamentals_score   int 1-10, mechanically derived
             valuation_score      int 1-10, mechanically derived
     """
+    # Back-fill trade_receivables / inventories / trade_payables from
+    # ratios_table days metrics if the balance sheet schedule rows are all None.
+    # This patches the data dict in-place so all downstream signal functions
+    # automatically benefit without any changes to their code.
+    wc = _backfill_wc_from_days(data)
+    data["balance_sheet"]["trade_receivables"] = wc["trade_receivables"]
+    data["balance_sheet"]["inventories"]       = wc["inventories"]
+    data["balance_sheet"]["trade_payables"]    = wc["trade_payables"]
+    data["wc_source"]                          = wc["wc_source"]
+
     piotroski        = _compute_piotroski(data)
     dupont           = _compute_dupont(data)
     earnings_quality = _compute_earnings_quality(data)
@@ -1158,4 +1269,5 @@ def compute_signals(data):
         "quarterly_momentum":   quarterly_mom,
         "fundamentals_score":   fundamentals_score,
         "valuation_score":      valuation_score,
+        "wc_source":            wc["wc_source"],
     }

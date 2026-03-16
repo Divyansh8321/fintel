@@ -671,8 +671,16 @@ def _get_key_ratios(soup: BeautifulSoup, ticker: str) -> dict:
                 return _parse_number_or_none(values[-1])
         return None
 
-    debt_to_equity = _optional_latest("Debt to Equity", "debt_to_equity")
-    current_ratio  = _optional_latest("Current Ratio",  "current_ratio")
+    # D/E and Current Ratio: check ul#top-ratios first (populated when user has
+    # added them via Edit Ratios), then fall back to section#ratios table.
+    def _top_or_table(top_key: str, table_label: str) -> float | None:
+        for k, v in top_map.items():
+            if top_key.lower() in k:
+                return _parse_number_or_none(v)
+        return _optional_latest(table_label, table_label)
+
+    debt_to_equity = _top_or_table("debt to equity", "Debt to Equity")
+    current_ratio  = _top_or_table("current ratio",  "Current Ratio")
 
     return {
         "pe":             pe,
@@ -711,7 +719,8 @@ def _get_pl_table(soup: BeautifulSoup, ticker: str) -> dict:
         )
 
     rows = _extract_table_rows(section, "profit-loss", ticker)
-    years = rows.get("__headers__", [])
+    # Screener renders columns oldest-first; reverse so index 0 = most recent.
+    years = list(reversed(rows.get("__headers__", [])))
     if not years:
         raise ValueError(
             f"Could not extract year headers from P&L table for ticker '{ticker}'."
@@ -719,7 +728,7 @@ def _get_pl_table(soup: BeautifulSoup, ticker: str) -> dict:
 
     def _row(label: str) -> list[float | None]:
         raw = _require_row(rows, label, "profit-loss", ticker)
-        return [_parse_number_or_none(v) for v in raw[: len(years)]]
+        return list(reversed([_parse_number_or_none(v) for v in raw[: len(years)]]))
 
     return {
         "units":               _extract_section_units(section, ticker),
@@ -857,7 +866,8 @@ def _get_balance_sheet(
         )
 
     rows = _extract_table_rows(section, "balance-sheet", ticker)
-    years = rows.get("__headers__", [])
+    # Screener renders columns oldest-first; reverse so index 0 = most recent.
+    years = list(reversed(rows.get("__headers__", [])))
     if not years:
         raise ValueError(
             f"Could not extract year headers from balance sheet for ticker '{ticker}'."
@@ -865,7 +875,7 @@ def _get_balance_sheet(
 
     def _row(label: str) -> list[float | None]:
         raw = _require_row(rows, label, "balance-sheet", ticker)
-        return [_parse_number_or_none(v) for v in raw[: len(years)]]
+        return list(reversed([_parse_number_or_none(v) for v in raw[: len(years)]]))
 
     # Fetch schedule sub-rows via API
     other_assets_sched = _fetch_schedule(company_id, "Other Assets",      "balance-sheet", is_consolidated)
@@ -896,9 +906,11 @@ def _get_balance_sheet(
         "cash_equivalents":       _sched(other_assets_sched, "Cash Equivalents"),
         # Other Liabilities schedule: current liability component
         "trade_payables":         _sched(other_liab_sched, "Trade Payables"),
-        # Borrowings schedule: debt structure
+        # Borrowings schedule: debt structure (lease liabilities included to match
+        # Screener's D/E definition: total debt = LT + ST + lease liabilities)
         "long_term_borrowings":   _sched(borrowings_sched, "Long term Borrowings"),
         "short_term_borrowings":  _sched(borrowings_sched, "Short term Borrowings"),
+        "lease_liabilities":      _sched(borrowings_sched, "Lease Liabilities"),
         # Fixed Assets schedule: gross/net block
         "gross_block":            _sched(fixed_assets_sched, "Gross Block"),
         "accumulated_depreciation": _sched(fixed_assets_sched, "Accumulated Depreciation"),
@@ -946,7 +958,8 @@ def _get_cash_flow(
         )
 
     rows = _extract_table_rows(section, "cash-flow", ticker)
-    years = rows.get("__headers__", [])
+    # Screener renders columns oldest-first; reverse so index 0 = most recent.
+    years = list(reversed(rows.get("__headers__", [])))
     if not years:
         raise ValueError(
             f"Could not extract year headers from cash flow for ticker '{ticker}'."
@@ -954,7 +967,7 @@ def _get_cash_flow(
 
     def _row(label: str) -> list[float | None]:
         raw = _require_row(rows, label, "cash-flow", ticker)
-        return [_parse_number_or_none(v) for v in raw[: len(years)]]
+        return list(reversed([_parse_number_or_none(v) for v in raw[: len(years)]]))
 
     # Fetch investing sub-schedule for explicit CapEx
     investing_sched = _fetch_schedule(company_id, "Cash from Investing Activity", "cash-flow", is_consolidated)
@@ -1002,7 +1015,8 @@ def _get_ratios_table(soup: BeautifulSoup, ticker: str) -> dict:
         )
 
     rows = _extract_table_rows(section, "ratios", ticker)
-    years = rows.get("__headers__", [])
+    # Screener renders columns oldest-first; reverse so index 0 = most recent.
+    years = list(reversed(rows.get("__headers__", [])))
     if not years:
         raise ValueError(
             f"Could not extract year headers from ratios table for ticker '{ticker}'."
@@ -1010,7 +1024,7 @@ def _get_ratios_table(soup: BeautifulSoup, ticker: str) -> dict:
 
     def _row(label: str) -> list[float | None]:
         raw = _require_row(rows, label, "ratios", ticker)
-        return [_parse_number_or_none(v) for v in raw[: len(years)]]
+        return list(reversed([_parse_number_or_none(v) for v in raw[: len(years)]]))
 
     return {
         "units":                 _extract_section_units(section, ticker),
