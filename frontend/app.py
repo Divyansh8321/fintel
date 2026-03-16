@@ -1,11 +1,12 @@
 # ============================================================
 # FILE: frontend/app.py
-# PURPOSE: Streamlit UI for Fintel. Shows the full Phase 2
-#          signal dashboard: Piotroski, DuPont, Graham Number,
-#          earnings quality, quarterly momentum, LLM brief,
-#          and recent news articles.
-# INPUT:   User-entered ticker string
-# OUTPUT:  Structured signal dashboard + investment brief
+# PURPOSE: Streamlit UI for Fintel. Phase 3 information-dense
+#          research dashboard: signal panel (Piotroski, DuPont,
+#          Graham Number, earnings quality, quarterly momentum),
+#          five analyst note panels, synthesis verdict panel,
+#          analyst score comparison bar chart, and recent news.
+# INPUT:   User-entered NSE ticker string
+# OUTPUT:  Full multi-analyst research dashboard
 # DEPENDS: streamlit, requests, src/api.py running on :8000
 # ============================================================
 
@@ -16,7 +17,7 @@ API_URL = "http://localhost:8000/analyze"
 
 st.set_page_config(page_title="Fintel", page_icon="📈", layout="wide")
 st.title("Fintel — AI Investment Research")
-st.caption("Indian stocks · Screener.in data · GPT-4o analysis · Phase 2")
+st.caption("Indian stocks · Screener.in data · GPT-4o multi-analyst engine · Phase 3")
 
 # ---------------------------------------------------------------------------
 # Input row
@@ -48,9 +49,9 @@ if not analyze_clicked:
 # Fetch data
 # ---------------------------------------------------------------------------
 
-with st.spinner(f"Fetching data for **{ticker}** — scraping + signals + news + AI…"):
+with st.spinner(f"Fetching data for **{ticker}** — scraping + signals + news + 5 analysts + synthesis…"):
     try:
-        resp = requests.post(API_URL, json={"ticker": ticker}, timeout=180)
+        resp = requests.post(API_URL, json={"ticker": ticker}, timeout=300)
         resp.raise_for_status()
         result = resp.json()
     except requests.exceptions.ConnectionError:
@@ -61,13 +62,16 @@ with st.spinner(f"Fetching data for **{ticker}** — scraping + signals + news +
         st.error(f"Error {resp.status_code}: {detail}")
         st.stop()
 
-source  = result.get("source", "live")
-data    = result.get("data", {})
-signals = result.get("signals", {})
-brief   = result.get("brief", {})
-news    = result.get("news")
+# Hard-index required keys — KeyError surfaces immediately if API shape is wrong.
+source    = result.get("source", "live")
+data      = result["data"]
+signals   = result["signals"]
+news      = result.get("news")
+# API returns analyst_notes as a list; convert to dict keyed by lens for easy lookup.
+agents    = {n["lens"]: n for n in result["analyst_notes"]}
+synthesis = result["synthesis"]   # consensus verdict dict
 
-header  = data.get("header", {})
+header = data.get("header", {})
 
 source_label = "cached" if source == "cache" else "live scrape"
 st.success(f"**{header.get('name', ticker)}** — served from **{source}** ({source_label})")
@@ -219,38 +223,131 @@ if pledge_flag != "none":
     st.warning(f"⚠️ Promoter pledging: {pledge_pct:.1f}% ({pledge_flag}) — trend: {pledge_trend}")
 
 # ---------------------------------------------------------------------------
-# Row 7 — LLM Brief
+# Phase 3 — Multi-Analyst Panel
 # ---------------------------------------------------------------------------
 
 st.divider()
-st.subheader("Investment Verdict")
-st.write(brief.get("verdict", ""))
+st.header("Multi-Analyst Research Panel")
 
-if brief.get("risk_flags"):
-    st.subheader("Risk Flags")
-    for flag in brief["risk_flags"]:
-        st.warning(f"⚠️ {flag}")
+_LENS_LABELS = {
+    "value":      "Value (Graham)",
+    "growth":     "Growth (Lynch)",
+    "quality":    "Quality (Munger)",
+    "contrarian": "Contrarian (Burry)",
+    "momentum":   "Momentum",
+}
+_ACTION_ICON = {"buy": "🟢 Buy", "hold": "🟡 Hold", "sell": "🔴 Sell", "avoid": "⚫ Avoid"}
 
-with st.expander("Fundamentals explanation"):
-    st.write(brief.get("fundamentals_explanation", ""))
+# -----------------------------------------------------------------------
+# Analyst score comparison bar chart
+# Each analyst returns a score 1–10. We plot them side by side so the
+# reader can immediately see which lenses are bullish vs bearish.
+# -----------------------------------------------------------------------
 
-with st.expander("Valuation explanation"):
-    st.write(brief.get("valuation_explanation", ""))
+# Build {label: score} dict, skipping any agent that errored out.
+score_data = {}
+for lens, note in agents.items():
+    if "error" not in note and note.get("score") is not None:
+        score_data[_LENS_LABELS.get(lens, lens.title())] = note["score"]
 
-with st.expander("Piotroski interpretation"):
-    st.write(brief.get("piotroski_interpretation", ""))
+st.subheader("Analyst Score Comparison (1–10)")
+st.bar_chart(score_data, height=250)
 
-with st.expander("Earnings quality note"):
-    st.write(brief.get("earnings_quality_note", ""))
+# -----------------------------------------------------------------------
+# Five analyst note panels — rendered in a fixed 5-column grid.
+# Each panel shows: score, action badge, thesis, key signals, risks.
+# -----------------------------------------------------------------------
 
-with st.expander("DuPont note"):
-    st.write(brief.get("dupont_note", ""))
+st.subheader("Analyst Notes")
+note_cols = st.columns(5)
 
-with st.expander("Quarterly trend"):
-    st.write(brief.get("quarterly_trend", ""))
+_DISPLAY_ORDER = ["value", "growth", "quality", "contrarian", "momentum"]
+for col_idx, lens in enumerate(_DISPLAY_ORDER):
+    note  = agents.get(lens, {})
+    col   = note_cols[col_idx]
+    label = _LENS_LABELS.get(lens, lens.title())
+
+    with col:
+        st.markdown(f"**{label}**")
+
+        # If this agent errored, show a minimal error state.
+        if "error" in note:
+            st.error(f"Agent error: {note['error']}")
+            continue
+
+        # Score and action in compact form.
+        score  = note.get("score", "—")
+        action = note.get("action", "")
+        st.metric("Score", f"{score} / 10")
+        st.write(_ACTION_ICON.get(action, action.title()))
+
+        # Investment thesis (full text — primary read).
+        thesis = note.get("thesis", "")
+        if thesis:
+            st.caption(thesis)
+
+        # Key signals that drove the score.
+        key_signals = note.get("key_signals", [])
+        if key_signals:
+            st.markdown("**Key signals:**")
+            for sig in key_signals:
+                st.write(f"• {sig}")
+
+        # Risks flagged by this analyst.
+        risks = note.get("risks", [])
+        if risks:
+            st.markdown("**Risks:**")
+            for risk in risks:
+                st.write(f"⚠ {risk}")
+
+# -----------------------------------------------------------------------
+# Synthesis verdict panel
+# Shows the weighted consensus score, bull/bear case, and final verdict.
+# -----------------------------------------------------------------------
+
+st.divider()
+st.subheader("Synthesis — Consensus Verdict")
+
+syn_score   = synthesis.get("weighted_score")
+# Derive the display action from the action_tally (most-voted action wins).
+_tally      = synthesis.get("action_tally", {})
+syn_action  = max(_tally, key=_tally.get) if _tally else ""
+syn_verdict = synthesis.get("verdict", "")
+
+sv1, sv2 = st.columns([1, 4])
+sv1.metric(
+    "Consensus Score",
+    f"{syn_score:.1f} / 10" if syn_score is not None else "—",
+)
+sv2.markdown(f"### {_ACTION_ICON.get(syn_action, syn_action.title())}")
+
+if syn_verdict:
+    st.write(syn_verdict)
+
+# Bull / bear case in two columns.
+bull = synthesis.get("bull_case", "")
+bear = synthesis.get("bear_case", "")
+if bull or bear:
+    bc1, bc2 = st.columns(2)
+    with bc1:
+        st.markdown("**Bull case**")
+        st.write(bull or "—")
+    with bc2:
+        st.markdown("**Bear case**")
+        st.write(bear or "—")
+
+# Per-analyst weight breakdown — in an expander to keep the main view clean.
+weights = synthesis.get("effective_weights", {})
+if weights:
+    with st.expander("Score weights breakdown"):
+        for lens, w in weights.items():
+            lbl  = _LENS_LABELS.get(lens, lens.title())
+            note = agents.get(lens, {})
+            sc   = note.get("score", "—") if "error" not in note else "error"
+            st.write(f"**{lbl}**: score {sc}/10 · weight {w*100:.0f}%")
 
 # ---------------------------------------------------------------------------
-# Row 8 — News
+# News panel
 # ---------------------------------------------------------------------------
 
 if news and news.get("articles"):
@@ -258,9 +355,9 @@ if news and news.get("articles"):
     st.subheader(f"Recent News — {_SENTIMENT_ICON.get(news_sentiment, '')} {news_sentiment.title()}")
     st.caption(news.get("sentiment_reason", ""))
     for article in news["articles"]:
-        pub = article.get("published_at", "")[:10]
-        src = article.get("source", "")
-        url = article.get("url", "")
+        pub   = article.get("published_at", "")[:10]
+        src   = article.get("source", "")
+        url   = article.get("url", "")
         title = article.get("title", "")
         if url:
             st.markdown(f"- [{title}]({url}) — *{src}*, {pub}")
@@ -268,7 +365,7 @@ if news and news.get("articles"):
             st.markdown(f"- {title} — *{src}*, {pub}")
 
 # ---------------------------------------------------------------------------
-# Row 9 — Raw data expander
+# Raw data expanders — useful for debugging
 # ---------------------------------------------------------------------------
 
 st.divider()
@@ -277,3 +374,9 @@ with st.expander("Full raw data (JSON)"):
 
 with st.expander("Full signals (JSON)"):
     st.json(signals)
+
+with st.expander("Full agent notes (JSON)"):
+    st.json(agents)
+
+with st.expander("Full synthesis (JSON)"):
+    st.json(synthesis)
