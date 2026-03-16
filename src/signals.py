@@ -7,7 +7,7 @@
 #          interpretation. Missing data yields None + reason,
 #          never an exception (see TRADEOFFS.md T-011).
 # INPUT:   data (dict) -- full output of fetch_company_data()
-# OUTPUT:  dict with 9 signal groups + 2 derived scores
+# OUTPUT:  dict with 9 signal groups + 2 derived scores + DCF
 # DEPENDS: math (stdlib only)
 # ============================================================
 
@@ -623,6 +623,202 @@ def _compute_balance_sheet_health(data, interest_coverage):
 
 
 # ---------------------------------------------------------------------------
+# Signal 7a: 3-Stage DCF Valuation (Phase 4)
+# ---------------------------------------------------------------------------
+# Discounted Cash Flow model using free cash flow to firm (FCFF).
+# WACC is fixed at 12% (Indian equity market baseline -- see TRADEOFFS.md).
+#
+# Stage structure (per CLAUDE.md Phase 4 spec):
+#   Stage 1 (years  1–5) : high growth    = min(revenue_cagr_3yr, 25%)
+#   Stage 2 (years  6–10): tapering growth = linearly decays from stage1 rate → terminal rate
+#   Stage 3 (terminal)   : perpetuity at 4% (India nominal GDP proxy)
+#
+# FCF base = most recent OCF + capex (capex is negative, so this is OCF − |capex|).
+# If capex unavailable, falls back to OCF + investing cash flow.
+# Intrinsic value per share = PV(all future FCFs) / shares_outstanding.
+#
+# Margin of safety = (intrinsic_value − current_price) / intrinsic_value.
+#   > 0: stock trades below intrinsic value (discount)
+#   < 0: stock trades above intrinsic value (premium)
+
+_DCF_WACC           = 0.12   # fixed WACC for all Indian equities
+_DCF_TERMINAL_RATE  = 0.04   # terminal growth rate (India nominal GDP proxy)
+_DCF_STAGE1_CAP     = 0.25   # cap stage-1 growth at 25% to avoid fantasy scenarios
+_DCF_STAGE1_YEARS   = 5
+_DCF_STAGE2_YEARS   = 5      # years 6–10
+
+
+def _compute_dcf(data):
+    """
+    Compute a 3-stage DCF intrinsic value per share.
+
+    All inputs are sourced from the scraper output dict; no LLM, no network.
+    WACC is fixed at 12% (see TRADEOFFS.md T-012 for rationale).
+
+    FCF base:
+        - Preferred: cash_flow.operating[0] + cash_flow.capex[0]
+          (capex field is negative so addition subtracts it from OCF)
+        - Fallback:  cash_flow.operating[0] + cash_flow.investing[0]
+
+    Growth rates:
+        - Stage 1 (yrs 1-5):  min(growth_rates.revenue_cagr_3yr / 100, 0.25)
+          Falls back to growth_rates.revenue_cagr_5yr, then profit_cagr_3yr.
+          If all are None, stage-1 rate defaults to terminal rate (conservative).
+        - Stage 2 (yrs 6-10): linearly tapers from stage-1 rate to terminal rate.
+        - Stage 3 (terminal): _DCF_TERMINAL_RATE in perpetuity.
+
+    Shares outstanding:
+        - Derived as: net_profit[0] / eps[0]   (both in same currency unit)
+        - Expressed in crores (same unit as net_profit in Screener data).
+
+    Args:
+        data: full dict from fetch_company_data()
+
+    Returns:
+        dict with:
+            dcf_intrinsic_value      float|None  — per share in INR
+            dcf_intrinsic_value_reason str|None  — why it's None
+            dcf_margin_of_safety     float|None  — fraction, positive = undervalued
+            dcf_verdict              str|None    — "undervalued"|"fairly_valued"|"overvalued"
+            dcf_stage1_growth        float|None  — actual stage-1 growth rate used
+            dcf_fcf_base             float|None  — FCF (crore INR) used as base
+    """
+    pl = data.get("pl_table", {})
+    cf = data.get("cash_flow", {})
+    gr = data.get("growth_rates", {})
+    h  = data.get("header", {})
+
+    result = {
+        "dcf_intrinsic_value":        None,
+        "dcf_intrinsic_value_reason": None,
+        "dcf_margin_of_safety":       None,
+        "dcf_verdict":                None,
+        "dcf_stage1_growth":          None,
+        "dcf_fcf_base":               None,
+    }
+
+    # --- Step 1: Establish FCF base (most recent year) ---
+    ocf0   = _safe(cf.get("operating"), 0)
+    capex0 = _safe(cf.get("capex"), 0)
+    inv0   = _safe(cf.get("investing"), 0)
+
+    if ocf0 is None:
+        result["dcf_intrinsic_value_reason"] = "operating cash flow unavailable"
+        return result
+
+    if capex0 is not None:
+        # capex field is already negative (cash outflow), so OCF + capex = FCF
+        fcf_base = ocf0 + capex0
+    elif inv0 is not None:
+        # Fallback: OCF + total investing (investing includes non-capex items too)
+        fcf_base = ocf0 + inv0
+    else:
+        result["dcf_intrinsic_value_reason"] = "capex and investing cash flow both unavailable"
+        return result
+
+    if fcf_base <= 0:
+        # Negative FCF companies cannot be valued via DCF -- too speculative
+        result["dcf_intrinsic_value_reason"] = (
+            f"FCF base non-positive ({round(fcf_base, 1)} cr) -- DCF not applicable"
+        )
+        return result
+
+    result["dcf_fcf_base"] = round(fcf_base, 2)
+
+    # --- Step 2: Determine stage-1 growth rate ---
+    # Prefer 3yr revenue CAGR; fall back to 5yr, then 3yr profit CAGR.
+    raw_growth = (
+        gr.get("revenue_cagr_3yr")
+        or gr.get("revenue_cagr_5yr")
+        or gr.get("profit_cagr_3yr")
+    )
+
+    if raw_growth is not None:
+        # CAGR values are stored as percentages (e.g., 15.2 means 15.2%)
+        stage1_rate = min(raw_growth / 100.0, _DCF_STAGE1_CAP)
+    else:
+        # No historical growth data -- use terminal rate as conservative proxy
+        stage1_rate = _DCF_TERMINAL_RATE
+
+    result["dcf_stage1_growth"] = round(stage1_rate * 100, 2)  # store as %
+
+    # --- Step 3: Project FCFs for stages 1 and 2 ---
+    total_pv   = 0.0
+    fcf_now    = fcf_base
+
+    # Stage 1: years 1 to 5 at constant stage1_rate
+    for yr in range(1, _DCF_STAGE1_YEARS + 1):
+        fcf_now  = fcf_now * (1 + stage1_rate)
+        discount = (1 + _DCF_WACC) ** yr
+        total_pv += fcf_now / discount
+
+    # Stage 2: years 6 to 10, growth tapers linearly from stage1_rate → terminal
+    # At year 6 growth = stage1_rate - 1 step; at year 10 = terminal_rate
+    step = (stage1_rate - _DCF_TERMINAL_RATE) / _DCF_STAGE2_YEARS
+    for yr_offset in range(1, _DCF_STAGE2_YEARS + 1):
+        taper_rate  = stage1_rate - (step * yr_offset)
+        taper_rate  = max(taper_rate, _DCF_TERMINAL_RATE)  # floor at terminal
+        fcf_now     = fcf_now * (1 + taper_rate)
+        yr_abs      = _DCF_STAGE1_YEARS + yr_offset
+        discount    = (1 + _DCF_WACC) ** yr_abs
+        total_pv   += fcf_now / discount
+
+    # Stage 3: terminal value using Gordon Growth Model
+    # TV = FCF_yr10 × (1 + g) / (WACC − g)  →  discounted back to today
+    terminal_fcf = fcf_now * (1 + _DCF_TERMINAL_RATE)
+    terminal_val = terminal_fcf / (_DCF_WACC - _DCF_TERMINAL_RATE)
+    tv_discount  = (1 + _DCF_WACC) ** (_DCF_STAGE1_YEARS + _DCF_STAGE2_YEARS)
+    total_pv    += terminal_val / tv_discount
+
+    # --- Step 4: Convert total PV (in crore INR) to per-share intrinsic value ---
+    np0  = _safe(pl.get("net_profit"), 0)
+    eps0 = _safe(pl.get("eps"), 0)
+
+    if np0 is None or eps0 is None:
+        result["dcf_intrinsic_value_reason"] = (
+            "net_profit or EPS unavailable -- cannot derive shares outstanding"
+        )
+        return result
+
+    if eps0 == 0:
+        result["dcf_intrinsic_value_reason"] = "EPS is zero -- cannot derive shares outstanding"
+        return result
+
+    # shares_outstanding (crore) = net_profit (crore) / EPS (INR per share)
+    # This gives shares in crore units, matching Screener's data convention.
+    shares_cr = np0 / eps0
+
+    if shares_cr <= 0:
+        result["dcf_intrinsic_value_reason"] = (
+            f"Derived shares outstanding non-positive ({round(shares_cr, 4)} cr)"
+        )
+        return result
+
+    # total_pv is in crore INR; shares_cr is in crore shares.
+    # intrinsic_value_per_share (INR) = total_pv_crore / shares_crore
+    # The crore units cancel: (crore INR) / (crore shares) = INR/share ✓
+    intrinsic_value = total_pv / shares_cr
+    result["dcf_intrinsic_value"] = round(intrinsic_value, 2)
+
+    # --- Step 5: Compute margin of safety vs current price ---
+    price = h.get("current_price")
+
+    if price is not None and price > 0:
+        mos = (intrinsic_value - price) / intrinsic_value
+        result["dcf_margin_of_safety"] = round(mos, 4)
+
+        # Verdict: >20% discount = undervalued; within ±20% = fairly_valued; else overvalued
+        if mos > 0.20:
+            result["dcf_verdict"] = "undervalued"
+        elif mos >= -0.20:
+            result["dcf_verdict"] = "fairly_valued"
+        else:
+            result["dcf_verdict"] = "overvalued"
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Signal 7: Valuation
 # ---------------------------------------------------------------------------
 # Graham Number = sqrt(22.5 x EPS x Book Value per Share)
@@ -659,6 +855,7 @@ def _compute_valuation(data):
         "graham_verdict":       None,
         "pe_current":           kr.get("pe"),
         "earnings_yield":       None,
+        # DCF fields are merged in by compute_signals after _compute_dcf runs
     }
 
     try:
@@ -917,7 +1114,7 @@ def compute_signals(data):
             growth_quality       Revenue/profit CAGR trends + margin trend
             capital_efficiency   ROCE trend + interest coverage + WC trend
             balance_sheet_health D/E trend + interest coverage
-            valuation            Graham Number + PE + earnings yield
+            valuation            Graham Number + PE + earnings yield + DCF fields
             promoter_risk        Pledged pct + flag
             quarterly_momentum   Revenue YoY + profit YoY + OPM trend
             fundamentals_score   int 1-10, mechanically derived
@@ -931,8 +1128,13 @@ def compute_signals(data):
     balance_sheet    = _compute_balance_sheet_health(
                            data, capital_eff.get("interest_coverage"))
     valuation        = _compute_valuation(data)
+    dcf              = _compute_dcf(data)
     promoter_risk    = _compute_promoter_risk(data)
     quarterly_mom    = _compute_quarterly_momentum(data)
+
+    # Merge DCF results into the valuation dict so all price-target signals
+    # are co-located and agents can access them via signals["valuation"].
+    valuation.update(dcf)
 
     fundamentals_score = _compute_fundamentals_score(
         piotroski.get("score"),
