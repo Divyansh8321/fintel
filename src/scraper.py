@@ -119,7 +119,7 @@ def _get_authenticated_session() -> requests.Session:
     return _session
 
 
-def _fetch_page(ticker: str) -> tuple[BeautifulSoup, bool, str]:
+def _fetch_page(ticker: str) -> tuple[BeautifulSoup, bool, str, str]:
     """
     Fetches the Screener.in company page for the given ticker.
 
@@ -164,17 +164,20 @@ def _fetch_page(ticker: str) -> tuple[BeautifulSoup, bool, str]:
         if is_consolidated and no_consolidated:
             continue  # retry with standalone
 
-        # Extract Screener's internal company ID from the data attribute.
-        # This is required to call the schedule sub-row API.
+        # Extract Screener's internal company ID and warehouse ID from the
+        # data attributes on div#company-info.
+        # company_id is needed for the schedule sub-row API.
+        # warehouse_id is needed for the quick_ratios API (user's custom ratios).
         company_div = soup.find(attrs={"data-company-id": True})
         if not company_div:
             raise RuntimeError(
                 f"Could not find data-company-id attribute for ticker '{ticker}'. "
                 "Screener.in page structure may have changed."
             )
-        company_id = company_div["data-company-id"]
+        company_id   = company_div["data-company-id"]
+        warehouse_id = company_div.get("data-warehouse-id", "")
 
-        return soup, is_consolidated, company_id
+        return soup, is_consolidated, company_id, warehouse_id
 
     raise ValueError(
         f"Could not load any page for ticker '{ticker}' on Screener.in."
@@ -610,20 +613,28 @@ def _get_company_header(soup: BeautifulSoup, ticker: str) -> dict:
     }
 
 
-def _get_key_ratios(soup: BeautifulSoup, ticker: str) -> dict:
+def _get_key_ratios(soup: BeautifulSoup, ticker: str, warehouse_id: str = "") -> dict:
     """
     Extracts headline valuation and return ratios from ul#top-ratios.
 
     PE, Book Value, ROCE, ROE always present. Debt/Equity and Current Ratio
-    pulled from the latest column of section#ratios — None when absent.
+    pulled from ul#top-ratios (when user has added them via Edit Ratios) or
+    fall back to section#ratios table.
+
+    Also calls /api/company/{warehouseId}/quick_ratios/ to fetch user-customised
+    ratios (e.g. Pledged percentage, Industry PE, Debt to equity) that Screener
+    injects via JS and are not in the static HTML. Merged into top_map so the
+    same _top_or_table() logic picks them up automatically.
 
     Args:
-        soup:   Parsed HTML of the Screener company page.
-        ticker: Ticker symbol used in error messages.
+        soup:         Parsed HTML of the Screener company page.
+        ticker:       Ticker symbol used in error messages.
+        warehouse_id: Screener's warehouse ID (data-warehouse-id on div#company-info).
+                      If empty, the quick_ratios API call is skipped gracefully.
 
     Returns:
         dict with keys: pe, book_value, roce, roe (float),
-        debt_to_equity, current_ratio (float or None).
+        debt_to_equity, current_ratio, pledged_pct (float or None).
 
     Raises:
         ValueError: if the panels are missing or values cannot be parsed.
@@ -641,6 +652,28 @@ def _get_key_ratios(soup: BeautifulSoup, ticker: str) -> dict:
         value_span = li.find("span", class_="number")
         if name_span and value_span:
             top_map[name_span.get_text(strip=True).lower()] = value_span.get_text(strip=True)
+
+    # Fetch user-customised quick ratios via the JS API endpoint.
+    # Screener renders these client-side so they are absent from the static HTML.
+    # On failure (no warehouse_id, network error, etc.) we skip silently — the
+    # fallback logic below will read D/E from the ratios table instead.
+    if warehouse_id:
+        try:
+            session = _get_authenticated_session()
+            qr_resp = session.get(
+                f"https://www.screener.in/api/company/{warehouse_id}/quick_ratios/",
+                timeout=10,
+            )
+            if qr_resp.status_code == 200 and qr_resp.text.strip():
+                qr_soup = BeautifulSoup(qr_resp.text, "lxml")
+                for li in qr_soup.find_all("li"):
+                    name_span = li.find("span", class_="name")
+                    value_span = li.find("span", class_="number")
+                    if name_span and value_span:
+                        key = name_span.get_text(strip=True).lower()
+                        top_map[key] = value_span.get_text(strip=True)
+        except Exception:
+            pass  # quick_ratios is enrichment — never fatal
 
     def _top(key: str, field: str) -> float:
         for k, v in top_map.items():
@@ -682,6 +715,14 @@ def _get_key_ratios(soup: BeautifulSoup, ticker: str) -> dict:
     debt_to_equity = _top_or_table("debt to equity", "Debt to Equity")
     current_ratio  = _top_or_table("current ratio",  "Current Ratio")
 
+    # Pledged percentage: only available via quick_ratios API (JS-rendered).
+    # Will be None if user hasn't added it to their Edit Ratios panel.
+    pledged_pct: float | None = None
+    for k, v in top_map.items():
+        if "pledged" in k:
+            pledged_pct = _parse_number_or_none(v)
+            break
+
     return {
         "pe":             pe,
         "book_value":     book_value,
@@ -689,6 +730,7 @@ def _get_key_ratios(soup: BeautifulSoup, ticker: str) -> dict:
         "roe":            roe,
         "debt_to_equity": debt_to_equity,
         "current_ratio":  current_ratio,
+        "pledged_pct":    pledged_pct,
     }
 
 
@@ -1260,7 +1302,7 @@ def fetch_company_data(ticker: str) -> dict:
     """
     ticker = ticker.strip().upper()
 
-    soup, is_consolidated, company_id = _fetch_page(ticker)
+    soup, is_consolidated, company_id, warehouse_id = _fetch_page(ticker)
 
     pl_section = soup.find("section", id="profit-loss")
     if not pl_section:
@@ -1275,7 +1317,7 @@ def fetch_company_data(ticker: str) -> dict:
         "currency":        top_currency,
         "header":          _get_company_header(soup, ticker),
         "header_units":    _HEADER_UNITS,
-        "key_ratios":      _get_key_ratios(soup, ticker),
+        "key_ratios":      _get_key_ratios(soup, ticker, warehouse_id),
         "pl_table":        _get_pl_table(soup, ticker),
         "growth_rates":    _get_growth_rates(soup, ticker),
         "balance_sheet":   _get_balance_sheet(soup, ticker, company_id, is_consolidated),

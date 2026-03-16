@@ -1013,7 +1013,12 @@ def _compute_promoter_risk(data):
         dict with pledged_pct and pledge_flag
     """
     sh = data.get("shareholding", {})
-    pledged = sh.get("pledged_pct", 0.0) or 0.0
+
+    # Prefer pledged_pct from key_ratios (fetched via quick_ratios API — accurate
+    # real-time value). Fall back to shareholding section (always 0.0 because
+    # Screener renders it via JS only).
+    kr_pledged = data.get("key_ratios", {}).get("pledged_pct")
+    pledged = kr_pledged if kr_pledged is not None else (sh.get("pledged_pct", 0.0) or 0.0)
 
     if pledged < 5.0:
         flag = "none"
