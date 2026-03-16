@@ -1,13 +1,15 @@
 # ============================================================
 # FILE: src/api.py
 # PURPOSE: FastAPI backend that ties together the scraper,
-#          signals, news, five analyst agents, and synthesis layer.
+#          signals, news, five analyst agents, synthesis layer,
+#          and BSE filings.
 #          Exposes GET /health, POST /analyze, DELETE /cache/{ticker}.
 # INPUT:   POST /analyze body: {"ticker": str}
 # OUTPUT:  JSON dict with scraped data + signals + news + analyst_notes
-#          + synthesis, plus a "source" field ("cache" or "live")
+#          + synthesis + filings, plus a "source" field ("cache" or "live")
 # DEPENDS: fastapi, uvicorn, src/scraper.py, src/signals.py,
 #          src/news.py, src/cache.py, src/agents/*, src/synthesis.py,
+#          src/filings.py,
 #          .env (OPENAI_API_KEY, SCREENER_EMAIL, SCREENER_PASSWORD, NEWS_API_KEY)
 # ============================================================
 
@@ -27,6 +29,7 @@ from src.agents.momentum import analyze as momentum_analyze
 from src.agents.quality import analyze as quality_analyze
 from src.agents.value import analyze as value_analyze
 from src.cache import DB_PATH, get_cached, init_db, set_cached
+from src.filings import fetch_filings
 from src.news import fetch_news
 from src.scraper import fetch_company_data
 from src.signals import compute_signals
@@ -55,7 +58,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Fintel API",
     description="AI-powered investment research for Indian stocks.",
-    version="3.0.0",
+    version="5.0.0",
     lifespan=lifespan,
 )
 
@@ -170,15 +173,16 @@ def health():
 @app.post("/analyze")
 def analyze(body: AnalyzeRequest):
     """
-    Main analysis endpoint. Runs the full Phase 3 pipeline:
+    Main analysis endpoint. Runs the full Phase 5 pipeline:
       1. Scrape fundamental data from Screener.in
-      2. Compute quantitative signals in Python (Piotroski, DuPont, etc.)
+      2. Compute quantitative signals in Python (Piotroski, DuPont, DCF, etc.)
       3. Fetch recent news and classify sentiment via gpt-4o-mini
       4. Run 5 analyst agents in parallel (each makes 1 GPT-4o call)
       5. Synthesise the 5 notes into a consensus verdict (1 GPT-4o call)
+      6. Fetch and summarise recent BSE corporate filings via gpt-4o-mini
 
-    Checks the SQLite cache first. Cache hits skip all 5 steps.
-    Total GPT-4o calls on a cache miss: 6 (5 agents + 1 synthesis).
+    Checks the SQLite cache first. Cache hits skip all 6 steps.
+    Total GPT-4o/mini calls on a cache miss: 6 agents/synthesis + up to 5 filing summaries.
 
     Args:
         body: AnalyzeRequest with field "ticker" (NSE/BSE symbol).
@@ -192,6 +196,8 @@ def analyze(body: AnalyzeRequest):
             analyst_notes   (list) — list of 5 agent output dicts
             synthesis       (dict) — output of synthesise(): weighted score,
                                      bull/bear case, verdict
+            filings         (dict) — output of fetch_filings(): BSE announcements
+                                     + gpt-4o-mini summaries, or None
 
     Raises:
         400: if the ticker is not found on Screener.in or any required field
@@ -251,6 +257,20 @@ def analyze(body: AnalyzeRequest):
             detail=f"OpenAI API error during synthesis for '{ticker}': {e}",
         )
 
+    # --- Step 6: Fetch BSE filings (non-blocking — failure captured in error field) ---
+    # bse_code comes from the scraper header (extracted from the Screener company page).
+    # If the BSE code is absent (e.g. NSE-only listing), filings are skipped gracefully.
+    filings = None
+    bse_code = company_data.get("header", {}).get("bse_code")
+    if bse_code:
+        try:
+            filings = fetch_filings(bse_code)
+        except Exception as e:
+            # Filings failure is non-fatal — a BSE API outage must never break analysis
+            print(f"Warning: filings fetch failed for '{ticker}' (BSE {bse_code}): {e}")
+    else:
+        print(f"Warning: no BSE code found for '{ticker}' — skipping filings.")
+
     # --- Cache and return ---
     result = {
         "data":           company_data,
@@ -258,6 +278,7 @@ def analyze(body: AnalyzeRequest):
         "news":           news,
         "analyst_notes":  analyst_notes,
         "synthesis":      synthesis,
+        "filings":        filings,
     }
     # Cache write failure must never break the response
     try:

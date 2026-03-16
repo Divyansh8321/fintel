@@ -1,12 +1,13 @@
 # ============================================================
 # FILE: frontend/app.py
-# PURPOSE: Streamlit UI for Fintel. Phase 3 information-dense
+# PURPOSE: Streamlit UI for Fintel. Phase 5 information-dense
 #          research dashboard: signal panel (Piotroski, DuPont,
-#          Graham Number, earnings quality, quarterly momentum),
-#          five analyst note panels, synthesis verdict panel,
-#          analyst score comparison bar chart, and recent news.
+#          Graham Number, DCF valuation, earnings quality,
+#          quarterly momentum), five analyst note panels,
+#          synthesis verdict panel, analyst score comparison
+#          bar chart, recent news, and BSE corporate filings.
 # INPUT:   User-entered NSE ticker string
-# OUTPUT:  Full multi-analyst research dashboard
+# OUTPUT:  Full multi-analyst research dashboard + filings panel
 # DEPENDS: streamlit, requests, src/api.py running on :8000
 # ============================================================
 
@@ -17,7 +18,7 @@ API_URL = "http://localhost:8000/analyze"
 
 st.set_page_config(page_title="Fintel", page_icon="📈", layout="wide")
 st.title("Fintel — AI Investment Research")
-st.caption("Indian stocks · Screener.in data · GPT-4o multi-analyst engine · Phase 3")
+st.caption("Indian stocks · Screener.in data · GPT-4o multi-analyst engine · Phase 5")
 
 # ---------------------------------------------------------------------------
 # Input row
@@ -49,7 +50,7 @@ if not analyze_clicked:
 # Fetch data
 # ---------------------------------------------------------------------------
 
-with st.spinner(f"Fetching data for **{ticker}** — scraping + signals + news + 5 analysts + synthesis…"):
+with st.spinner(f"Fetching data for **{ticker}** — scraping + signals + news + 5 analysts + synthesis + filings…"):
     try:
         resp = requests.post(API_URL, json={"ticker": ticker}, timeout=300)
         resp.raise_for_status()
@@ -67,6 +68,7 @@ source    = result.get("source", "live")
 data      = result["data"]
 signals   = result["signals"]
 news      = result.get("news")
+filings   = result.get("filings")
 # API returns analyst_notes as a list; convert to dict keyed by lens for easy lookup.
 agents    = {n["lens"]: n for n in result["analyst_notes"]}
 synthesis = result["synthesis"]   # consensus verdict dict
@@ -158,7 +160,7 @@ with dc2:
         st.write(f"FCF / Net Profit: **{eq['fcf_to_net_profit']:.2f}x**")
 
 # ---------------------------------------------------------------------------
-# Row 4 — Valuation (Graham Number)
+# Row 4 — Valuation (Graham Number + DCF)
 # ---------------------------------------------------------------------------
 
 st.divider()
@@ -185,6 +187,39 @@ vc3.metric(
     "Earnings Yield",
     f"{val['earnings_yield']:.2f}%" if val.get("earnings_yield") is not None else "—"
 )
+
+# DCF sub-panel — shown only when a valid intrinsic value was computed.
+# dcf_verdict is "undervalued" | "fairly_valued" | "overvalued" | None
+_DCF_VERDICT_ICON = {
+    "undervalued":   "🟢 Undervalued",
+    "fairly_valued": "🟡 Fairly valued",
+    "overvalued":    "🔴 Overvalued",
+}
+dcf_intrinsic = val.get("dcf_intrinsic_value")
+dcf_verdict   = val.get("dcf_verdict")
+dcf_mos       = val.get("dcf_margin_of_safety")
+dcf_g1        = val.get("dcf_stage1_growth")
+dcf_reason    = val.get("dcf_intrinsic_value_reason")
+
+dc1, dc2, dc3 = st.columns(3)
+if dcf_intrinsic is not None:
+    dc1.metric("DCF Intrinsic Value", f"₹{dcf_intrinsic:,.0f}")
+    dc2.metric(
+        "Margin of Safety",
+        f"{dcf_mos * 100:+.1f}%" if dcf_mos is not None else "—",
+        delta_color="normal",
+    )
+    dc3.metric(
+        "DCF Verdict",
+        _DCF_VERDICT_ICON.get(dcf_verdict, dcf_verdict or "—"),
+    )
+    if dcf_g1 is not None:
+        st.caption(f"Stage-1 growth rate used: **{dcf_g1:.1f}%** · WACC: 12% · Terminal: 4%")
+else:
+    # DCF could not be computed — show the reason so the user understands why
+    dc1.metric("DCF Intrinsic Value", "—")
+    if dcf_reason:
+        st.caption(f"DCF unavailable: {dcf_reason}")
 
 # ---------------------------------------------------------------------------
 # Row 5 — Quarterly Momentum + Balance Sheet
@@ -363,6 +398,43 @@ if news and news.get("articles"):
             st.markdown(f"- [{title}]({url}) — *{src}*, {pub}")
         else:
             st.markdown(f"- {title} — *{src}*, {pub}")
+
+# ---------------------------------------------------------------------------
+# BSE Filings panel
+# ---------------------------------------------------------------------------
+
+st.divider()
+st.subheader("Recent BSE Filings")
+
+if filings is None:
+    # No BSE code scraped, or fetch threw an exception
+    bse_code_display = data.get("header", {}).get("bse_code", "")
+    if not bse_code_display:
+        st.caption("BSE code not found for this ticker — filings unavailable.")
+    else:
+        st.caption("Filings could not be fetched.")
+elif filings.get("error"):
+    st.warning(f"Could not fetch BSE filings: {filings['error']}")
+elif not filings.get("filings"):
+    st.caption("No recent BSE announcements found.")
+else:
+    # One expander per filing: date · category · title in the header; summary inside.
+    for filing in filings["filings"]:
+        f_title    = filing.get("title", "Untitled")
+        f_date     = filing.get("date", "")
+        f_category = filing.get("category", "")
+        f_pdf_url  = filing.get("pdf_url")
+        f_summary  = filing.get("summary")
+
+        header_line = f"{f_date}  ·  {f_category}  ·  {f_title}" if (f_date or f_category) else f_title
+
+        with st.expander(header_line):
+            if f_summary:
+                st.write(f_summary)
+            else:
+                st.caption("Summary unavailable (image-only PDF or download failed).")
+            if f_pdf_url:
+                st.markdown(f"[View PDF on BSE]({f_pdf_url})")
 
 # ---------------------------------------------------------------------------
 # Raw data expanders — useful for debugging
