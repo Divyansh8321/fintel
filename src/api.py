@@ -2,20 +2,25 @@
 # FILE: src/api.py
 # PURPOSE: FastAPI backend that ties together the scraper,
 #          signals, news, five analyst agents, synthesis layer,
-#          and BSE filings.
-#          Exposes GET /health, POST /analyze, DELETE /cache/{ticker}.
+#          BSE filings, and memory (Phase 6).
+#          Exposes GET /health, POST /analyze,
+#          DELETE /cache/{ticker}, GET /history/{ticker},
+#          GET /watchlist, POST /watchlist,
+#          DELETE /watchlist/{ticker}.
 # INPUT:   POST /analyze body: {"ticker": str}
+#          POST /watchlist body: {"ticker": str, "note": str}
 # OUTPUT:  JSON dict with scraped data + signals + news + analyst_notes
 #          + synthesis + filings, plus a "source" field ("cache" or "live")
 # DEPENDS: fastapi, uvicorn, src/scraper.py, src/signals.py,
 #          src/news.py, src/cache.py, src/agents/*, src/synthesis.py,
-#          src/filings.py,
+#          src/filings.py, src/memory.py,
 #          .env (OPENAI_API_KEY, SCREENER_EMAIL, SCREENER_PASSWORD, NEWS_API_KEY)
 # ============================================================
 
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
+from typing import Optional
 
 import requests as req_lib
 from dotenv import load_dotenv
@@ -30,6 +35,14 @@ from src.agents.quality import analyze as quality_analyze
 from src.agents.value import analyze as value_analyze
 from src.cache import DB_PATH, get_cached, init_db, set_cached
 from src.filings import fetch_filings
+from src.memory import (
+    add_to_watchlist,
+    get_history,
+    get_watchlist,
+    init_memory_tables,
+    remove_from_watchlist,
+    save_analysis,
+)
 from src.news import fetch_news
 from src.scraper import fetch_company_data
 from src.signals import compute_signals
@@ -47,18 +60,20 @@ async def lifespan(app: FastAPI):
     """
     FastAPI lifespan context manager.
 
-    On startup: initialises the SQLite cache database (creates the table
-    if it doesn't exist). This runs once before the first request is served.
+    On startup: initialises the SQLite cache database and the two new
+    memory tables (analyst_history, watchlist). All calls are idempotent —
+    safe to run on every restart.
     On shutdown: nothing to clean up — SQLite connections are per-request.
     """
     init_db()
+    init_memory_tables()
     yield
 
 
 app = FastAPI(
     title="Fintel API",
     description="AI-powered investment research for Indian stocks.",
-    version="5.0.0",
+    version="6.0.0",
     lifespan=lifespan,
 )
 
@@ -70,6 +85,12 @@ app = FastAPI(
 class AnalyzeRequest(BaseModel):
     """Request body for POST /analyze."""
     ticker: str
+
+
+class WatchlistAddRequest(BaseModel):
+    """Request body for POST /watchlist."""
+    ticker: str
+    note: Optional[str] = ""
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +148,7 @@ def _run_agents_parallel(data: dict, signals: dict, news: dict | None) -> list[d
 
 
 # ---------------------------------------------------------------------------
-# Endpoints
+# Endpoints — cache management
 # ---------------------------------------------------------------------------
 
 @app.delete("/cache/{ticker}")
@@ -159,6 +180,10 @@ def clear_cache(ticker: str):
     return {"cleared": True, "ticker": ticker}
 
 
+# ---------------------------------------------------------------------------
+# Endpoints — health
+# ---------------------------------------------------------------------------
+
 @app.get("/health")
 def health():
     """
@@ -170,18 +195,24 @@ def health():
     return {"status": "ok"}
 
 
+# ---------------------------------------------------------------------------
+# Endpoints — analysis
+# ---------------------------------------------------------------------------
+
 @app.post("/analyze")
 def analyze(body: AnalyzeRequest):
     """
-    Main analysis endpoint. Runs the full Phase 5 pipeline:
+    Main analysis endpoint. Runs the full Phase 5 pipeline + Phase 6 memory:
       1. Scrape fundamental data from Screener.in
       2. Compute quantitative signals in Python (Piotroski, DuPont, DCF, etc.)
       3. Fetch recent news and classify sentiment via gpt-4o-mini
       4. Run 5 analyst agents in parallel (each makes 1 GPT-4o call)
       5. Synthesise the 5 notes into a consensus verdict (1 GPT-4o call)
       6. Fetch and summarise recent BSE corporate filings via gpt-4o-mini
+      7. Persist the result to analyst_history (Phase 6)
 
-    Checks the SQLite cache first. Cache hits skip all 6 steps.
+    Checks the SQLite cache first. Cache hits skip steps 1–6 but still
+    record a history entry so every "view" is tracked.
     Total GPT-4o/mini calls on a cache miss: 6 agents/synthesis + up to 5 filing summaries.
 
     Args:
@@ -208,9 +239,14 @@ def analyze(body: AnalyzeRequest):
     """
     ticker = body.ticker.strip().upper()
 
-    # --- Cache hit: return immediately without any network calls ---
+    # --- Cache hit: return immediately but still record the history entry ---
     cached = get_cached(ticker)
     if cached is not None:
+        # Record even cache-served views so history shows all lookups
+        try:
+            save_analysis(ticker, cached)
+        except Exception as e:
+            print(f"Warning: memory write failed for '{ticker}': {e}")
         return {"source": "cache", **cached}
 
     # --- Step 1: Scrape Screener.in ---
@@ -271,7 +307,6 @@ def analyze(body: AnalyzeRequest):
     else:
         print(f"Warning: no BSE code found for '{ticker}' — skipping filings.")
 
-    # --- Cache and return ---
     result = {
         "data":           company_data,
         "signals":        signals,
@@ -280,10 +315,100 @@ def analyze(body: AnalyzeRequest):
         "synthesis":      synthesis,
         "filings":        filings,
     }
-    # Cache write failure must never break the response
+
+    # --- Cache write — failure must never break the response ---
     try:
         set_cached(ticker, result)
     except Exception as e:
         print(f"Warning: cache write failed for '{ticker}': {e}")
 
+    # --- Step 7: Persist to analyst_history (Phase 6) ---
+    try:
+        save_analysis(ticker, result)
+    except Exception as e:
+        print(f"Warning: memory write failed for '{ticker}': {e}")
+
     return {"source": "live", **result}
+
+
+# ---------------------------------------------------------------------------
+# Endpoints — memory: history
+# ---------------------------------------------------------------------------
+
+@app.get("/history/{ticker}")
+def history(ticker: str):
+    """
+    Returns all historical analysis runs for a ticker, newest first.
+
+    Each item contains the run timestamp, consensus score, verdict,
+    per-agent scores, and the full signals dict for that run.
+
+    Args:
+        ticker: NSE/BSE symbol in the URL path, e.g. /history/RELIANCE.
+
+    Returns:
+        {"ticker": str, "runs": list[dict]} — runs is empty if no history.
+
+    Raises:
+        No 404 — an empty list is returned for unknown tickers.
+    """
+    ticker = ticker.strip().upper()
+    runs = get_history(ticker)
+    return {"ticker": ticker, "runs": runs}
+
+
+# ---------------------------------------------------------------------------
+# Endpoints — memory: watchlist
+# ---------------------------------------------------------------------------
+
+@app.get("/watchlist")
+def list_watchlist():
+    """
+    Returns all tickers currently in the watchlist, alphabetically.
+
+    Returns:
+        {"watchlist": list[dict]} — each item has ticker, added_at, note.
+    """
+    return {"watchlist": get_watchlist()}
+
+
+@app.post("/watchlist")
+def add_watchlist(body: WatchlistAddRequest):
+    """
+    Adds a ticker to the watchlist (or updates its note if already present).
+
+    Args:
+        body: WatchlistAddRequest with fields "ticker" and optional "note".
+
+    Returns:
+        {"added": True, "ticker": str}
+    """
+    ticker = body.ticker.strip().upper()
+    if not ticker:
+        raise HTTPException(status_code=400, detail="ticker must not be empty.")
+    add_to_watchlist(ticker, body.note or "")
+    return {"added": True, "ticker": ticker}
+
+
+@app.delete("/watchlist/{ticker}")
+def delete_watchlist(ticker: str):
+    """
+    Removes a ticker from the watchlist.
+
+    Args:
+        ticker: NSE/BSE symbol in the URL path, e.g. /watchlist/RELIANCE.
+
+    Returns:
+        {"removed": True, "ticker": str} on success.
+
+    Raises:
+        404: if the ticker is not in the watchlist.
+    """
+    ticker = ticker.strip().upper()
+    removed = remove_from_watchlist(ticker)
+    if not removed:
+        raise HTTPException(
+            status_code=404,
+            detail=f"'{ticker}' is not in the watchlist.",
+        )
+    return {"removed": True, "ticker": ticker}
