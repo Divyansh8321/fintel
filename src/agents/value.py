@@ -188,6 +188,13 @@ def analyze(data: dict, signals: dict, news: dict | None) -> dict:
                     if val.get("price_to_graham") is not None else None,
                 "graham_verdict": val.get("graham_verdict"),
                 "pe_current": val.get("pe_current"),
+                "industry_pe": val.get("industry_pe"),
+                "pe_vs_industry": (
+                    round(val.get("pe_current") / val.get("industry_pe"), 2)
+                    if val.get("pe_current") and val.get("industry_pe") else None
+                ),
+                "ev_ebitda": val.get("ev_ebitda"),
+                "price_to_sales": val.get("price_to_sales"),
                 "earnings_yield_pct": val.get("earnings_yield"),
             },
             "owner_earnings": {

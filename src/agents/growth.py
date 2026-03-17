@@ -145,6 +145,12 @@ def analyze(data: dict, signals: dict, news: dict | None) -> dict:
                 "roe_computed_pct": dup.get("roe_computed"),
             },
             "pe_current": val.get("pe_current"),
+            "industry_pe": val.get("industry_pe"),
+            "pe_vs_industry": (
+                round(val.get("pe_current") / val.get("industry_pe"), 2)
+                if val.get("pe_current") and val.get("industry_pe") else None
+            ),
+            "price_to_sales": val.get("price_to_sales"),
             "earnings_yield_pct": val.get("earnings_yield"),
             "news_sentiment": news.get("sentiment") if news else None,
         }

@@ -151,9 +151,11 @@ def analyze(data: dict, signals: dict, news: dict | None) -> dict:
             "sector":   data.get("header", {}).get("sector", "Unknown"),
             "current_price_inr": data.get("header", {}).get("current_price"),
             "promoter_risk": {
-                "pledged_pct":   pr.get("pledged_pct"),
-                "pledge_flag":   pr.get("pledge_flag"),     # "none"|"moderate"|"high"
-                "pledge_trend":  pr.get("pledge_trend"),    # "stable"|"increasing"|"decreasing"
+                "pledged_pct":             pr.get("pledged_pct"),
+                "pledge_flag":             pr.get("pledge_flag"),
+                "pledge_trend":            pr.get("pledge_trend"),
+                "promoter_holding":        pr.get("promoter_holding"),
+                "promoter_holding_change": pr.get("promoter_holding_change"),
             },
             "balance_sheet_stress": {
                 "debt_to_equity":    bsh.get("debt_to_equity_latest"),

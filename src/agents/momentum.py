@@ -146,6 +146,11 @@ def analyze(data: dict, signals: dict, news: dict | None) -> dict:
             "valuation_context": {
                 "earnings_yield_pct": val.get("earnings_yield"),
                 "pe_current":         val.get("pe_current"),
+                "industry_pe":        val.get("industry_pe"),
+                "pe_vs_industry": (
+                    round(val.get("pe_current") / val.get("industry_pe"), 2)
+                    if val.get("pe_current") and val.get("industry_pe") else None
+                ),
             },
             "news_sentiment":        news.get("sentiment") if news else None,
             "news_sentiment_reason": news.get("sentiment_reason") if news else None,

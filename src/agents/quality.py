@@ -151,6 +151,12 @@ def analyze(data: dict, signals: dict, news: dict | None) -> dict:
                 "acceleration":   gq.get("acceleration"),
             },
             "pe_current":       val.get("pe_current"),
+            "industry_pe":      val.get("industry_pe"),
+            "ev_ebitda":        val.get("ev_ebitda"),
+            "promoter": {
+                "promoter_holding":        signals.get("promoter_risk", {}).get("promoter_holding"),
+                "promoter_holding_change": signals.get("promoter_risk", {}).get("promoter_holding_change"),
+            },
             "news_sentiment":   news.get("sentiment") if news else None,
         }
 

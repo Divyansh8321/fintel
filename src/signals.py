@@ -956,6 +956,10 @@ def _compute_valuation(data):
         "graham_verdict":       None,
         "pe_current":           kr.get("pe"),
         "earnings_yield":       None,
+        # Relative valuation multiples from quick_ratios API
+        "ev_ebitda":            kr.get("ev_ebitda"),
+        "price_to_sales":       kr.get("price_to_sales"),
+        "industry_pe":          kr.get("industry_pe"),
         # DCF fields are merged in by compute_signals after _compute_dcf runs
     }
 
@@ -1042,7 +1046,18 @@ def _compute_promoter_risk(data):
             elif diff < -2.0:
                 pledge_trend = "decreasing"
 
-    return {"pledged_pct": pledged, "pledge_flag": flag, "pledge_trend": pledge_trend}
+    # Promoter holding and QoQ change — from quick_ratios API via key_ratios.
+    kr = data.get("key_ratios", {})
+    promoter_holding        = kr.get("promoter_holding")
+    promoter_holding_change = kr.get("promoter_holding_change")
+
+    return {
+        "pledged_pct":             pledged,
+        "pledge_flag":             flag,
+        "pledge_trend":            pledge_trend,
+        "promoter_holding":        promoter_holding,
+        "promoter_holding_change": promoter_holding_change,
+    }
 
 
 # ---------------------------------------------------------------------------

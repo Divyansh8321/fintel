@@ -715,22 +715,35 @@ def _get_key_ratios(soup: BeautifulSoup, ticker: str, warehouse_id: str = "") ->
     debt_to_equity = _top_or_table("debt to equity", "Debt to Equity")
     current_ratio  = _top_or_table("current ratio",  "Current Ratio")
 
-    # Pledged percentage: only available via quick_ratios API (JS-rendered).
-    # Will be None if user hasn't added it to their Edit Ratios panel.
-    pledged_pct: float | None = None
-    for k, v in top_map.items():
-        if "pledged" in k:
-            pledged_pct = _parse_number_or_none(v)
-            break
+    # The following fields are only available via quick_ratios API (JS-rendered).
+    # All return None if user hasn't added them via Edit Ratios on Screener.
+    def _quick(keyword: str) -> float | None:
+        """Return first top_map value whose key contains keyword."""
+        for k, v in top_map.items():
+            if keyword in k:
+                return _parse_number_or_none(v)
+        return None
+
+    pledged_pct             = _quick("pledged")
+    ev_ebitda               = _quick("evebitda") or _quick("ev/ebitda") or _quick("ev / ebitda")
+    price_to_sales          = _quick("price to sales") or _quick("p/s")
+    promoter_holding        = _quick("promoter holding")
+    promoter_holding_change = _quick("change in prom") or _quick("prom hold change")
+    industry_pe             = _quick("industry pe")
 
     return {
-        "pe":             pe,
-        "book_value":     book_value,
-        "roce":           roce,
-        "roe":            roe,
-        "debt_to_equity": debt_to_equity,
-        "current_ratio":  current_ratio,
-        "pledged_pct":    pledged_pct,
+        "pe":                      pe,
+        "book_value":              book_value,
+        "roce":                    roce,
+        "roe":                     roe,
+        "debt_to_equity":          debt_to_equity,
+        "current_ratio":           current_ratio,
+        "pledged_pct":             pledged_pct,
+        "ev_ebitda":               ev_ebitda,
+        "price_to_sales":          price_to_sales,
+        "promoter_holding":        promoter_holding,
+        "promoter_holding_change": promoter_holding_change,
+        "industry_pe":             industry_pe,
     }
 
 
