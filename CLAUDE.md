@@ -18,16 +18,16 @@ See `INSPIRATION.md` for the reference projects that shaped this design.
 
 ## Current Phase
 
-**PHASE 3 — Multi-Analyst Engine**
+**PHASE 3 ✅ COMPLETE (Batches 1–3 done; Batch 4 frontend pending)**
 
 Phase 1 (scraper + LLM wrapper) ✅ COMPLETE
 Phase 2 (signal engine + news + signal dashboard) ✅ COMPLETE
+Phase 3 (multi-analyst engine + synthesis) ✅ COMPLETE — agents live, synthesis wired, API v3.0.0
+Phase 4 (DCF valuation) ✅ COMPLETE — 3-stage DCF merged into signals.py valuation group
 
-Phase 3 adds five analyst agents + synthesis layer. Each agent receives the same pre-computed
-signals dict and explains them from a distinct investing lens using GPT-4o. Python still does
-all maths. LLMs still only explain.
+Next: Phase 3 Batch 4 (frontend multi-analyst UI) → Phase 5 (BSE filings) → Phase 6 (memory)
 
-### Phase 3 Architecture
+### Current Architecture
 
 ```
 scraper.py → signals.py → news.py → agents/ → synthesis.py → api.py → frontend
@@ -36,7 +36,7 @@ scraper.py → signals.py → news.py → agents/ → synthesis.py → api.py �
 
 **The core principle:** Python does the maths. GPT-4o explains the maths. Never the other way around.
 
-**New principle in Phase 3:** Multiple analyst lenses. One set of signals, five explanations —
+**Phase 3 principle:** Multiple analyst lenses. One set of signals, five explanations —
 each from a distinct investing philosophy adapted for Indian markets.
 
 ---
@@ -129,7 +129,14 @@ For any agent or orchestration code:
 - Charts are allowed (`st.bar_chart`) for the analyst score comparison panel.
 - No custom CSS, no multi-page setup.
 
-### 10. GitHub
+### 10. Scraper Memory Skill
+- A skill called `scraper-memory` is configured at `~/.claude/skills/scraper-memory/SKILL.md`.
+- It MUST be activated before reading or modifying `src/scraper.py` or any scraper-related file.
+- It maintains `~/.claude/scraper-notes/screener.md` — a persistent log of Screener.in quirks,
+  undocumented API endpoints, field-level gotchas, and session auth notes.
+- Read the notes file before writing scraper code. Update it only when something new is discovered.
+
+### 11. GitHub
 - After I approve a set of files, automatically commit and push to GitHub.
 - Commit message format: `"Phase N BatchN: add/update {filename(s)} — {one line description}"`
 - Never push unapproved code.
@@ -163,16 +170,14 @@ streamlit run frontend/app.py           # frontend on :8501
 **Batch 3:** src/api.py + frontend/app.py — wire pipeline + full signal dashboard
 Also done: scraper.py major rewrite (schedule sub-row API for CapEx, inventories, trade receivables, etc.)
 
-### Phase 3 — Multi-Analyst Engine (CURRENT)
-Build in this exact order, 2–3 files at a time:
+### Phase 3 — Multi-Analyst Engine ✅ COMPLETE
+**Batch 1:** src/agents/value.py + src/agents/growth.py ✅
+**Batch 2:** src/agents/quality.py + src/agents/contrarian.py + src/agents/momentum.py ✅
+**Batch 3:** src/synthesis.py + update src/api.py ✅
+**Batch 4:** update frontend/app.py for multi-analyst UI ← NEXT
 
-**Batch 1:** src/agents/value.py + src/agents/growth.py
-**Batch 2:** src/agents/quality.py + src/agents/contrarian.py + src/agents/momentum.py
-**Batch 3:** src/synthesis.py + update src/api.py
-**Batch 4:** update frontend/app.py for multi-analyst UI
-
-### Phase 4 — DCF Valuation
-**Batch 1:** update src/signals.py — add 3-stage DCF with fixed WACC=12%
+### Phase 4 — DCF Valuation ✅ COMPLETE
+**Batch 1:** update src/signals.py — 3-stage DCF with fixed WACC=12% ✅
 
 ### Phase 5 — BSE Filing RAG
 **Batch 1:** src/filings.py — BSE announcements API + PDF summarisation via gpt-4o-mini
@@ -198,9 +203,9 @@ fintel/
 ├── data/
 │   └── cache/              ← SQLite DB lives here (fintel.db)
 ├── src/
-│   ├── scraper.py          ← Screener.in scraper (Phase 2 rewrite, stable)
+│   ├── scraper.py          ← Screener.in scraper (stable; quick_ratios API added post-Phase 3)
 │   ├── cache.py            ← SQLite cache layer, 3 functions (Phase 1, stable)
-│   ├── signals.py          ← quantitative signal engine (Phase 2, stable; DCF added Phase 4)
+│   ├── signals.py          ← quantitative signal engine (Phase 2 + DCF Phase 4, stable)
 │   ├── news.py             ← NewsAPI + gpt-4o-mini sentiment (Phase 2, stable)
 │   ├── analysis.py         ← single-analyst LLM brief (Phase 2; retired in Phase 3 Batch 3)
 │   ├── agents/             ← NEW Phase 3
@@ -229,11 +234,11 @@ All receive the same pre-computed `signals` dict. System prompt changes per agen
 
 | Agent | File | Philosophy | Key signals used | Extra Python computation |
 |-------|------|-----------|-----------------|--------------------------|
-| Value | agents/value.py | Graham + Buffett | graham_number, price_to_graham, earnings_quality, debt_trend, Piotroski F8-F9 | Owner Earnings = NI + depreciation − capex − ΔWC; owner earnings yield vs 10yr Gsec |
-| Growth | agents/growth.py | Lynch + Fisher | growth_quality.acceleration, revenue_yoy_pct, margin_trend, dupont.roe_driver | PEG = PE / profit_cagr_3yr |
-| Quality | agents/quality.py | Munger + Pabrai | roce_latest, roce_trend, net_margin, earnings_quality, piotroski.score | ROCE vs WACC (12%) spread |
-| Contrarian | agents/contrarian.py | Burry + Druckenmiller | promoter_risk, balance_sheet_health, pledge_trend, high D/E | Debt service coverage = OCF / interest expense |
-| Momentum | agents/momentum.py | Quantitative | quarterly_momentum, earnings_yield, 52w price position, news sentiment | Price % vs 52w high/low range |
+| Value | agents/value.py | Graham + Buffett | graham_number, price_to_graham, earnings_quality, debt_trend, piotroski, ev_ebitda, price_to_sales, pe_vs_industry | Owner Earnings = NI + dep − capex − ΔWC; OE yield vs 10yr Gsec |
+| Growth | agents/growth.py | Lynch + Fisher | growth_quality.acceleration, revenue_yoy_pct, margin_trend, dupont.roe_driver, industry_pe, price_to_sales | PEG = PE / profit_cagr_3yr |
+| Quality | agents/quality.py | Munger + Pabrai | roce_latest, roce_trend, net_margin, earnings_quality, piotroski, ev_ebitda, promoter_holding | ROCE vs WACC (12%) spread |
+| Contrarian | agents/contrarian.py | Burry + Druckenmiller | promoter_risk, balance_sheet_health, pledge_trend, promoter_holding_change | Debt service coverage = OCF / interest expense |
+| Momentum | agents/momentum.py | Quantitative | quarterly_momentum, earnings_yield, 52w price position, industry_pe, news sentiment | Price % vs 52w high/low range |
 
 Agent output schema (all 5 identical):
 ```python
@@ -260,8 +265,8 @@ Synthesis weights (default): value=25%, quality=25%, growth=20%, contrarian=20%,
 4. **Growth Quality**: Revenue/profit CAGR acceleration/deceleration + margin trend
 5. **Capital Efficiency**: ROCE trend over 5 years + working capital cycle trend
 6. **Balance Sheet Health**: D/E trend + interest coverage (EBIT/Interest)
-7. **Valuation**: Graham Number + price premium/discount + PE + earnings yield (DCF added Phase 4)
-8. **Promoter Risk**: Pledged % flag (none/moderate/high) + pledge trend from shareholding history
+7. **Valuation**: Graham Number + price premium/discount + PE + earnings yield + DCF (3-stage, WACC=12%) + EV/EBITDA + Price/Sales + Industry PE
+8. **Promoter Risk**: Pledged % + pledge flag + trend + promoter holding % + QoQ change
 9. **Quarterly Momentum**: Revenue YoY%, profit YoY%, OPM trend
 
 Scores are mechanically derived from signals in Python — GPT-4o explains them, does not compute them.
@@ -279,12 +284,17 @@ Scores are mechanically derived from signals in Python — GPT-4o explains them,
 ## Known Limitations
 - Screener.in has no official API — HTML structure may change.
 - Screener schedule sub-row API (`/api/company/{id}/schedules/`) is undocumented — may change.
+- Screener quick_ratios API (`/api/company/{warehouse_id}/quick_ratios/`) is undocumented — may change.
+- Custom ratios (pledged_pct, ev_ebitda, price_to_sales, promoter_holding, industry_pe) only appear
+  if the user has added them via Screener's "Edit Ratios" panel — they won't populate otherwise.
 - Add 2–3 second delays between Screener requests to avoid IP blocks.
 - Indian stocks only (Phase 1–6).
 - NewsAPI free tier: 100 requests/day (24h cache limits usage to ~1 call/ticker/day).
 - Graham Number undervalues high-growth companies by design — analysts must contextualise.
 - Signal gaps (missing data fields) produce null signals, not errors — see TRADEOFFS.md T-011.
-- Phase 3: 6 GPT-4o calls per analysis (~30–40s response time, not streamed yet).
-- Phase 4 DCF: WACC fixed at 12% (Indian equities baseline) — no company-specific WACC.
+- 6 GPT-4o calls per analysis (~30–40s response time, not streamed yet).
+- DCF: WACC fixed at 12% (Indian equities baseline) — no company-specific WACC.
+- DCF returns None for companies with negative FCF (e.g. DMART) — correct by design.
 - Phase 5 BSE filings: BSE API is undocumented; PDF parsing is brittle for scanned documents.
 - No finance-specific LLM available as public API — GPT-4o used per Rule 7 — see TRADEOFFS.md T-009.
+- Banks/NBFCs may break scraper (different P&L structure — "Revenue from operations" not "Sales").
