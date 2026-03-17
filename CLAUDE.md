@@ -18,14 +18,18 @@ See `INSPIRATION.md` for the reference projects that shaped this design.
 
 ## Current Phase
 
-**PHASE 3 ✅ COMPLETE (Batches 1–3 done; Batch 4 frontend pending)**
+**ALL 6 PHASES COMPLETE ✅**
 
 Phase 1 (scraper + LLM wrapper) ✅ COMPLETE
 Phase 2 (signal engine + news + signal dashboard) ✅ COMPLETE
-Phase 3 (multi-analyst engine + synthesis) ✅ COMPLETE — agents live, synthesis wired, API v3.0.0
-Phase 4 (DCF valuation) ✅ COMPLETE — 3-stage DCF merged into signals.py valuation group
+Phase 3 (multi-analyst engine + synthesis + frontend) ✅ COMPLETE
+Phase 4 (DCF valuation) ✅ COMPLETE — 3-stage DCF in signals.py, WACC=12%
+Phase 5 (BSE filings RAG) ✅ COMPLETE — filings.py + wired into API + frontend
+Phase 6 (memory + watchlist) ✅ COMPLETE — memory.py, history chart, watchlist panel
 
-Next: Phase 3 Batch 4 (frontend multi-analyst UI) → Phase 5 (BSE filings) → Phase 6 (memory)
+**Next (post-Phase 6 improvements):**
+- Banks/NBFCs support: scraper breaks on different P&L structure (no "Sales" row)
+- DCF alternatives for negative-FCF companies: EV/EBITDA relative, P/S, dividend yield
 
 ### Current Architecture
 
@@ -171,23 +175,23 @@ streamlit run frontend/app.py           # frontend on :8501
 Also done: scraper.py major rewrite (schedule sub-row API for CapEx, inventories, trade receivables, etc.)
 
 ### Phase 3 — Multi-Analyst Engine ✅ COMPLETE
-**Batch 1:** src/agents/value.py + src/agents/growth.py ✅
-**Batch 2:** src/agents/quality.py + src/agents/contrarian.py + src/agents/momentum.py ✅
-**Batch 3:** src/synthesis.py + update src/api.py ✅
-**Batch 4:** update frontend/app.py for multi-analyst UI ← NEXT
+All 4 batches done — agents, synthesis, API v3.0.0, frontend multi-analyst UI.
 
 ### Phase 4 — DCF Valuation ✅ COMPLETE
-**Batch 1:** update src/signals.py — 3-stage DCF with fixed WACC=12% ✅
+3-stage DCF in signals.py with fixed WACC=12%. Returns None for negative-FCF companies.
 
-### Phase 5 — BSE Filing RAG
-**Batch 1:** src/filings.py — BSE announcements API + PDF summarisation via gpt-4o-mini
-**Batch 2:** update src/api.py + frontend/app.py — wire filings into pipeline and UI
+### Phase 5 — BSE Filing RAG ✅ COMPLETE
+src/filings.py + API + frontend wired.
 
-### Phase 6 — Memory + Watchlist
-**Batch 1:** src/memory.py — SQLite history + watchlist (2 new tables in existing DB)
-**Batch 2:** update frontend/app.py — historical score chart + watchlist panel
+### Phase 6 — Memory + Watchlist ✅ COMPLETE
+src/memory.py, history chart, watchlist panel in frontend.
 
-Wait for approval after every batch.
+### Post-Phase 6 — Ongoing Improvements
+Work on these next, one at a time, with approval after each:
+1. **Banks/NBFCs support** — scraper assumes "Sales" row; banks use "Revenue from operations" / "Interest earned"
+2. **DCF alternatives for negative-FCF companies** — when DCF is None, show EV/EBITDA relative, P/S, dividend yield
+
+Wait for approval after each improvement batch.
 
 ---
 
