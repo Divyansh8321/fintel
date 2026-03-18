@@ -1207,6 +1207,86 @@ def _compute_valuation_score(price_to_graham, pe_current):
 
 
 # ---------------------------------------------------------------------------
+# Bank / NBFC signal group
+# ---------------------------------------------------------------------------
+
+def _compute_bank_signals(data):
+    """
+    Compute bank/NBFC-specific investment signals from scraper output.
+
+    Regular signals (Piotroski, DuPont, working capital cycle, etc.) are not
+    meaningful for banks. This function produces an equivalent bank_signals
+    dict covering the metrics that matter for financials:
+
+      - NIM trend (net interest margin — profitability of lending)
+      - NPA trend (asset quality — lower is better)
+      - CAR vs regulatory minimum (capital adequacy — safety buffer)
+      - Price to Book (primary bank valuation metric)
+      - ROE trend (return on equity — efficiency)
+      - Deposit growth (liability franchise strength)
+
+    All data sourced from scraper's bank_ratios dict (wiki commentary API)
+    and key_ratios (quick_ratios API). Missing values → None, never raises.
+
+    Args:
+        data: full dict from fetch_company_data() with is_bank=True
+
+    Returns:
+        dict with keys: nim_pct, nim_trend, gross_npa_pct, net_npa_pct,
+        npa_flag, car_pct, car_vs_minimum, price_to_book, roe_latest,
+        roe_trend, deposit_growth_pct
+    """
+    br = data.get("bank_ratios", {})
+    kr = data.get("key_ratios", {})
+    bs = data.get("balance_sheet", {})
+    pl = data.get("pl_table", {})
+
+    result = {
+        "nim_pct":            br.get("nim_pct"),
+        "nim_trend":          None,
+        "gross_npa_pct":      br.get("gross_npa_pct"),
+        "net_npa_pct":        br.get("net_npa_pct"),
+        "npa_flag":           None,
+        "car_pct":            br.get("car_pct"),
+        "car_vs_minimum":     None,
+        "price_to_book":      kr.get("price_to_book"),
+        "roe_latest":         kr.get("roe"),
+        "roe_trend":          None,
+        "deposit_growth_pct": None,
+    }
+
+    # NPA flag: < 2% = low (green), 2–5% = medium (amber), > 5% = high (red)
+    gnpa = br.get("gross_npa_pct")
+    if gnpa is not None:
+        if gnpa < 2.0:
+            result["npa_flag"] = "low"
+        elif gnpa <= 5.0:
+            result["npa_flag"] = "medium"
+        else:
+            result["npa_flag"] = "high"
+
+    # CAR vs minimum: RBI requires 10.875% Tier 1 + buffers → ~11.5% effective minimum
+    car = br.get("car_pct")
+    if car is not None:
+        result["car_vs_minimum"] = round(car - 11.5, 2)
+
+    # ROE trend from ratios_table ROCE proxy (banks don't break out ROCE)
+    # Fall back to pl_table net_profit growth as a proxy for ROE direction
+    net_profit = pl.get("net_profit", [])
+    if len(_non_none(net_profit)) >= 3:
+        result["roe_trend"] = _trend(net_profit, 3)
+
+    # Deposit growth (annual): newest vs prior year
+    deposits = bs.get("deposits", [])
+    d_new = _safe(deposits, 0)
+    d_old = _safe(deposits, 1)
+    if d_new is not None and d_old is not None and d_old != 0:
+        result["deposit_growth_pct"] = round((d_new - d_old) / abs(d_old) * 100, 2)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -1240,16 +1320,22 @@ def compute_signals(data):
             quarterly_momentum   Revenue YoY + profit YoY + OPM trend
             fundamentals_score   int 1-10, mechanically derived
             valuation_score      int 1-10, mechanically derived
+            bank_signals         Bank/NBFC-specific signals (None if not a bank)
     """
+    is_bank = data.get("is_bank", False)
+
     # Back-fill trade_receivables / inventories / trade_payables from
     # ratios_table days metrics if the balance sheet schedule rows are all None.
-    # This patches the data dict in-place so all downstream signal functions
-    # automatically benefit without any changes to their code.
-    wc = _backfill_wc_from_days(data)
-    data["balance_sheet"]["trade_receivables"] = wc["trade_receivables"]
-    data["balance_sheet"]["inventories"]       = wc["inventories"]
-    data["balance_sheet"]["trade_payables"]    = wc["trade_payables"]
-    data["wc_source"]                          = wc["wc_source"]
+    # Skip for banks — they never have working capital rows.
+    if not is_bank:
+        wc = _backfill_wc_from_days(data)
+        data["balance_sheet"]["trade_receivables"] = wc["trade_receivables"]
+        data["balance_sheet"]["inventories"]       = wc["inventories"]
+        data["balance_sheet"]["trade_payables"]    = wc["trade_payables"]
+        data["wc_source"]                          = wc["wc_source"]
+        wc_source = wc["wc_source"]
+    else:
+        wc_source = "bank — WC not applicable"
 
     piotroski        = _compute_piotroski(data)
     dupont           = _compute_dupont(data)
@@ -1266,6 +1352,9 @@ def compute_signals(data):
     # Merge DCF results into the valuation dict so all price-target signals
     # are co-located and agents can access them via signals["valuation"].
     valuation.update(dcf)
+
+    # Bank-specific signals — only computed for bank/NBFC tickers
+    bank_signals = _compute_bank_signals(data) if is_bank else None
 
     fundamentals_score = _compute_fundamentals_score(
         piotroski.get("score"),
@@ -1289,5 +1378,6 @@ def compute_signals(data):
         "quarterly_momentum":   quarterly_mom,
         "fundamentals_score":   fundamentals_score,
         "valuation_score":      valuation_score,
-        "wc_source":            wc["wc_source"],
+        "bank_signals":         bank_signals,
+        "wc_source":            wc_source,
     }

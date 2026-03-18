@@ -31,6 +31,7 @@ load_dotenv()
 LOGIN_URL    = "https://www.screener.in/login/"
 COMPANY_URL  = "https://www.screener.in/company/{ticker}/{variant}"
 SCHEDULE_URL = "https://www.screener.in/api/company/{company_id}/schedules/"
+WIKI_URL     = "https://www.screener.in/wiki/company/{company_id}/commentary/v2/"
 REQUEST_DELAY_SECONDS = 2.5
 
 # Module-level authenticated session — created once on first use, reused
@@ -801,6 +802,337 @@ def _get_pl_table(soup: BeautifulSoup, ticker: str) -> dict:
     }
 
 
+def _is_bank(soup: BeautifulSoup) -> bool:
+    """
+    Detects whether this Screener page is for a bank or NBFC.
+
+    Banks and NBFCs use different P&L row labels than regular companies.
+    We detect by checking the extracted row labels from the P&L section:
+      - Row starting with "Revenue" instead of "Sales"
+      - Row starting with "Financing Margin" instead of "OPM %"
+
+    Both conditions must be true to avoid false positives.
+
+    Args:
+        soup: Parsed HTML of the Screener company page.
+
+    Returns:
+        True if the page belongs to a bank or NBFC, False otherwise.
+    """
+    section = soup.find("section", id="profit-loss")
+    if not section:
+        return False
+    rows = _extract_table_rows(section, "profit-loss", "?")
+    has_revenue = any(k.lower().startswith("revenue") for k in rows)
+    has_fin_margin = any(k.lower().startswith("financing margin") for k in rows)
+    return has_revenue and has_fin_margin
+
+
+def _get_pl_table_bank(soup: BeautifulSoup, ticker: str) -> dict:
+    """
+    Extracts the annual P&L for a bank or NBFC — uses different row labels
+    than regular companies.
+
+    Mapping from bank labels → output keys (normalised to match regular P&L schema):
+      Revenue+          → sales (interest income + other income)
+      Financing Profit  → operating_profit
+      Financing Margin% → opm_pct
+      Other Income      → other_income
+      Interest          → interest (interest expense on borrowings)
+      Depreciation      → depreciation
+      Net Profit        → net_profit
+      EPS               → eps
+      Dividend Payout   → dividend_payout_pct
+      Tax %             → tax_pct
+
+    Args:
+        soup:   Parsed HTML of the Screener company page.
+        ticker: Ticker symbol used in error messages.
+
+    Returns:
+        dict with the same keys as _get_pl_table — downstream code is unaffected.
+
+    Raises:
+        ValueError: if the section or any required row is missing.
+    """
+    section = soup.find("section", id="profit-loss")
+    if not section:
+        raise ValueError(
+            f"Could not find section#profit-loss for ticker '{ticker}'. "
+            "Screener.in page structure may have changed."
+        )
+
+    rows = _extract_table_rows(section, "profit-loss", ticker)
+    years = list(reversed(rows.get("__headers__", [])))
+    if not years:
+        raise ValueError(
+            f"Could not extract year headers from P&L table for bank ticker '{ticker}'."
+        )
+
+    def _row(label: str) -> list[float | None]:
+        raw = _require_row(rows, label, "profit-loss", ticker)
+        return list(reversed([_parse_number_or_none(v) for v in raw[: len(years)]]))
+
+    def _opt_row(label: str) -> list[float | None]:
+        """Same as _row but returns all-None instead of raising if row missing."""
+        label_lower = label.lower()
+        for key, values in rows.items():
+            if key.lower().startswith(label_lower):
+                return list(reversed([_parse_number_or_none(v) for v in values[: len(years)]]))
+        return [None] * len(years)
+
+    return {
+        "units":               _extract_section_units(section, ticker),
+        "years":               years,
+        # Bank "Revenue+" = interest income + other income (total revenue)
+        "sales":               _row("Revenue"),
+        # Bank "Financing Profit" = revenue − interest expense − provisions
+        "operating_profit":    _row("Financing Profit"),
+        "opm_pct":             _row("Financing Margin"),
+        "other_income":        _opt_row("Other Income"),
+        "interest":            _row("Interest"),
+        "depreciation":        _row("Depreciation"),
+        "net_profit":          _row("Net Profit"),
+        "eps":                 _row("EPS"),
+        "dividend_payout_pct": _opt_row("Dividend Payout"),
+        "tax_pct":             _opt_row("Tax %"),
+    }
+
+
+def _get_balance_sheet_bank(
+    soup: BeautifulSoup,
+    ticker: str,
+    company_id: str,
+    is_consolidated: bool,
+) -> dict:
+    """
+    Extracts the annual Balance Sheet for a bank or NBFC.
+
+    Banks have different balance sheet structure:
+      - "Deposits" row (customer deposits = largest liability)
+      - No Trade Receivables / Inventories / Trade Payables schedule rows
+        (banks don't hold inventory or have trade cycles)
+      - Borrowings still present (market borrowings, interbank)
+
+    Returns the same schema as _get_balance_sheet with None for missing
+    working-capital rows — downstream code handles None gracefully.
+
+    Args:
+        soup:           Parsed HTML of the Screener company page.
+        ticker:         Ticker symbol used in error messages.
+        company_id:     Screener internal company ID for the schedule API.
+        is_consolidated: Whether to request consolidated schedule data.
+
+    Returns:
+        dict with same keys as _get_balance_sheet. WC rows set to all-None.
+
+    Raises:
+        ValueError: if the section or any required row is missing.
+    """
+    section = soup.find("section", id="balance-sheet")
+    if not section:
+        raise ValueError(
+            f"Could not find section#balance-sheet for ticker '{ticker}'. "
+            "Screener.in page structure may have changed."
+        )
+
+    rows = _extract_table_rows(section, "balance-sheet", ticker)
+    years = list(reversed(rows.get("__headers__", [])))
+    if not years:
+        raise ValueError(
+            f"Could not extract year headers from balance sheet for bank ticker '{ticker}'."
+        )
+
+    def _row(label: str) -> list[float | None]:
+        raw = _require_row(rows, label, "balance-sheet", ticker)
+        return list(reversed([_parse_number_or_none(v) for v in raw[: len(years)]]))
+
+    def _opt_row(label: str) -> list[float | None]:
+        label_lower = label.lower()
+        for key, values in rows.items():
+            if key.lower().startswith(label_lower):
+                return list(reversed([_parse_number_or_none(v) for v in values[: len(years)]]))
+        return [None] * len(years)
+
+    # Fetch borrowings schedule — banks still have market borrowings
+    borrowings_sched   = _fetch_schedule(company_id, "Borrowings",    "balance-sheet", is_consolidated)
+    fixed_assets_sched = _fetch_schedule(company_id, "Fixed Assets",  "balance-sheet", is_consolidated)
+
+    def _sched(sched_data: dict, label: str) -> list[float | None]:
+        return _schedule_series(sched_data, label, years)
+
+    none_series = [None] * len(years)
+
+    return {
+        "units":                    _extract_section_units(section, ticker),
+        "years":                    years,
+        "equity_capital":           _row("Equity Capital"),
+        "reserves":                 _row("Reserves"),
+        "borrowings":               _opt_row("Borrowings"),
+        # Deposits = customer deposits (the bank's primary liability)
+        "deposits":                 _opt_row("Deposits"),
+        "other_liabilities":        _opt_row("Other Liabilities"),
+        "total_liabilities":        _row("Total Liabilities"),
+        "fixed_assets":             _opt_row("Fixed Assets"),
+        "cwip":                     none_series,      # banks rarely have CWIP
+        "investments":              _opt_row("Investments"),
+        "other_assets":             _opt_row("Other Assets"),
+        "total_assets":             _row("Total Assets"),
+        # Working capital rows — not applicable for banks
+        "inventories":              none_series,
+        "trade_receivables":        none_series,
+        "cash_equivalents":         none_series,
+        "trade_payables":           none_series,
+        # Borrowings schedule (market borrowings, not deposits)
+        "long_term_borrowings":     _sched(borrowings_sched, "Long term Borrowings"),
+        "short_term_borrowings":    _sched(borrowings_sched, "Short term Borrowings"),
+        "lease_liabilities":        _sched(borrowings_sched, "Lease Liabilities"),
+        # Fixed assets schedule
+        "gross_block":              _sched(fixed_assets_sched, "Gross Block"),
+        "accumulated_depreciation": _sched(fixed_assets_sched, "Accumulated Depreciation"),
+    }
+
+
+def _get_ratios_table_bank(soup: BeautifulSoup, ticker: str) -> dict:
+    """
+    Extracts the ratios table for a bank or NBFC.
+
+    Banks only have ROE % in the efficiency ratios section — no debtor days,
+    inventory days, days payable, or working capital days. All WC rows are
+    returned as None lists so downstream code handles them gracefully.
+
+    Args:
+        soup:   Parsed HTML of the Screener company page.
+        ticker: Ticker symbol used in error messages.
+
+    Returns:
+        dict with same keys as _get_ratios_table. WC rows set to all-None.
+
+    Raises:
+        ValueError: if the section or year headers are missing.
+    """
+    section = soup.find("section", id="ratios")
+    if not section:
+        raise ValueError(
+            f"Could not find section#ratios for ticker '{ticker}'. "
+            "Screener.in page structure may have changed."
+        )
+
+    rows = _extract_table_rows(section, "ratios", ticker)
+    years = list(reversed(rows.get("__headers__", [])))
+    if not years:
+        raise ValueError(
+            f"Could not extract year headers from ratios table for bank ticker '{ticker}'."
+        )
+
+    none_series = [None] * len(years)
+
+    def _opt_row(label: str) -> list[float | None]:
+        label_lower = label.lower()
+        for key, values in rows.items():
+            if key.lower().startswith(label_lower):
+                return list(reversed([_parse_number_or_none(v) for v in values[: len(years)]]))
+        return none_series
+
+    return {
+        "units":                 _extract_section_units(section, ticker),
+        "years":                 years,
+        # Working capital metrics don't apply to banks
+        "debtor_days":           none_series,
+        "inventory_days":        none_series,
+        "days_payable":          none_series,
+        "cash_conversion_cycle": none_series,
+        "working_capital_days":  none_series,
+        # ROCE is available for some banks; fall back to None if absent
+        "roce":                  _opt_row("ROCE"),
+    }
+
+
+def _get_bank_wiki_ratios(company_id: str, ticker: str) -> dict:
+    """
+    Fetches bank/NBFC-specific metrics (CAR, NIM, Gross NPA, Net NPA, ROA)
+    from Screener's wiki commentary API.
+
+    The wiki commentary modal contains a "Key Ratios" block with bank-specific
+    metrics. Different banks use slightly different labels:
+      - HDFCBANK: "Capital Adequacy Ratio", "NIM", "Gross NPA", "Net NPA"
+      - SBIN:     "CRAR", "NIM", "GNPA", "NNPA"
+      - BAJFINANCE (NBFC): "CRAR", "Gross NPA", "Net NPA" (no NIM)
+
+    We regex-parse all variants. Returns None for any metric not found.
+
+    Args:
+        company_id: Screener's internal company ID.
+        ticker:     Ticker symbol used in error messages.
+
+    Returns:
+        dict with keys: car_pct, nim_pct, gross_npa_pct, net_npa_pct, roa_pct
+        (each float | None).
+    """
+    session = _get_authenticated_session()
+    result = {
+        "car_pct":       None,
+        "nim_pct":       None,
+        "gross_npa_pct": None,
+        "net_npa_pct":   None,
+        "roa_pct":       None,
+    }
+
+    try:
+        time.sleep(REQUEST_DELAY_SECONDS)
+        resp = session.get(
+            WIKI_URL.format(company_id=company_id),
+            headers={"X-Requested-With": "XMLHttpRequest"},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return result
+        text = resp.text
+    except Exception:
+        return result
+
+    def _find(patterns: list[str]) -> float | None:
+        """Try each regex pattern; return first match parsed as float."""
+        for pat in patterns:
+            m = re.search(pat, text, re.IGNORECASE)
+            if m:
+                return _parse_number_or_none(m.group(1))
+        return None
+
+    # Capital Adequacy Ratio — labelled as CAR, CRAR, or "Capital Adequacy Ratio"
+    result["car_pct"] = _find([
+        r"Capital Adequacy Ratio[:\s]+([0-9]+\.?[0-9]*)\s*%",
+        r"\bCRAR[:\s]+([0-9]+\.?[0-9]*)\s*%",
+        r"\bCAR[:\s]+([0-9]+\.?[0-9]*)\s*%",
+    ])
+
+    # Net Interest Margin — mainly banks, not NBFCs
+    result["nim_pct"] = _find([
+        r"\bNIM[:\s]+([0-9]+\.?[0-9]*)\s*%",
+        r"Net Interest Margin[:\s]+([0-9]+\.?[0-9]*)\s*%",
+    ])
+
+    # Gross NPA %
+    result["gross_npa_pct"] = _find([
+        r"Gross NPA[:\s]+([0-9]+\.?[0-9]*)\s*%",
+        r"\bGNPA[:\s]+([0-9]+\.?[0-9]*)\s*%",
+    ])
+
+    # Net NPA %
+    result["net_npa_pct"] = _find([
+        r"Net NPA[:\s]+([0-9]+\.?[0-9]*)\s*%",
+        r"\bNNPA[:\s]+([0-9]+\.?[0-9]*)\s*%",
+    ])
+
+    # Return on Assets — not always present
+    result["roa_pct"] = _find([
+        r"\bROA[:\s]+([0-9]+\.?[0-9]*)\s*%",
+        r"Return on Assets[:\s]+([0-9]+\.?[0-9]*)\s*%",
+    ])
+
+    return result
+
+
 def _get_growth_rates(soup: BeautifulSoup, ticker: str) -> dict:
     """
     Extracts compounded annual growth rates from the ranges-tables inside
@@ -836,13 +1168,16 @@ def _get_growth_rates(soup: BeautifulSoup, ticker: str) -> dict:
             "Screener.in page structure may have changed."
         )
 
-    def _find_table(header_text: str) -> BeautifulSoup:
+    def _find_table(*header_texts: str) -> BeautifulSoup:
+        """Find a ranges-table whose <th> contains any of the given strings."""
         for t in ranges_tables:
             th = t.find("th")
-            if th and header_text.lower() in th.get_text(strip=True).lower():
-                return t
+            if th:
+                th_text = th.get_text(strip=True).lower()
+                if any(h.lower() in th_text for h in header_texts):
+                    return t
         raise ValueError(
-            f"Could not find '{header_text}' table in profit-loss section "
+            f"Could not find table matching {header_texts} in profit-loss section "
             f"for ticker '{ticker}'. Screener.in page structure may have changed."
         )
 
@@ -857,7 +1192,8 @@ def _get_growth_rates(soup: BeautifulSoup, ticker: str) -> dict:
                 )
         return result
 
-    sales  = _parse_ranges(_find_table("Compounded Sales Growth"),  "sales_cagr")
+    # Banks show "Compounded Revenue Growth" instead of "Compounded Sales Growth"
+    sales  = _parse_ranges(_find_table("Compounded Sales Growth", "Compounded Revenue Growth"),  "sales_cagr")
     profit = _parse_ranges(_find_table("Compounded Profit Growth"), "profit_cagr")
 
     def _get(d: dict, key: str, field: str) -> float:
@@ -1128,12 +1464,24 @@ def _get_quarterly_results(soup: BeautifulSoup, ticker: str) -> dict:
         raw = _require_row(rows, label, "quarters", ticker)
         return [_parse_number_or_none(v) for v in raw[: len(quarters)]]
 
+    def _opt_row(label: str) -> list[float | None]:
+        label_lower = label.lower()
+        for key, values in rows.items():
+            if key.lower().startswith(label_lower):
+                return [_parse_number_or_none(v) for v in values[: len(quarters)]]
+        return [None] * len(quarters)
+
+    # Banks use "Revenue+" instead of "Sales", "Financing Profit"/"Financing Margin %"
+    # instead of "Operating Profit"/"OPM %". Detect by checking which label exists.
+    has_revenue = any(k.lower().startswith("revenue") for k in rows)
+    has_fin_profit = any(k.lower().startswith("financing profit") for k in rows)
+
     return {
         "units":            _extract_section_units(section, ticker),
         "quarters":         quarters,
-        "sales":            _row("Sales"),
-        "operating_profit": _row("Operating Profit"),
-        "opm_pct":          _row("OPM %"),
+        "sales":            _opt_row("Revenue") if has_revenue else _row("Sales"),
+        "operating_profit": _opt_row("Financing Profit") if has_fin_profit else _row("Operating Profit"),
+        "opm_pct":          _opt_row("Financing Margin") if has_fin_profit else _row("OPM %"),
         "net_profit":       _row("Net Profit"),
         "eps":              _row("EPS"),
     }
@@ -1325,18 +1673,36 @@ def fetch_company_data(ticker: str) -> dict:
     pl_units     = _extract_section_units(pl_section, ticker)
     top_currency = pl_units["currency"]
 
+    # Detect bank/NBFC and route to separate scrapers for P&L, balance sheet,
+    # and ratios — these sections have structurally different rows for financials.
+    is_bank = _is_bank(soup)
+
+    if is_bank:
+        pl_table      = _get_pl_table_bank(soup, ticker)
+        balance_sheet = _get_balance_sheet_bank(soup, ticker, company_id, is_consolidated)
+        ratios_table  = _get_ratios_table_bank(soup, ticker)
+        bank_ratios   = _get_bank_wiki_ratios(company_id, ticker)
+    else:
+        pl_table      = _get_pl_table(soup, ticker)
+        balance_sheet = _get_balance_sheet(soup, ticker, company_id, is_consolidated)
+        ratios_table  = _get_ratios_table(soup, ticker)
+        bank_ratios   = {}
+
     return {
         "is_consolidated": is_consolidated,
+        "is_bank":         is_bank,
         "currency":        top_currency,
         "header":          _get_company_header(soup, ticker),
         "header_units":    _HEADER_UNITS,
         "key_ratios":      _get_key_ratios(soup, ticker, warehouse_id),
-        "pl_table":        _get_pl_table(soup, ticker),
+        "pl_table":        pl_table,
         "growth_rates":    _get_growth_rates(soup, ticker),
-        "balance_sheet":   _get_balance_sheet(soup, ticker, company_id, is_consolidated),
+        "balance_sheet":   balance_sheet,
         "cash_flow":       _get_cash_flow(soup, ticker, company_id, is_consolidated),
-        "ratios_table":    _get_ratios_table(soup, ticker),
+        "ratios_table":    ratios_table,
         "quarterly":       _get_quarterly_results(soup, ticker),
         "shareholding":    _get_shareholding(soup, ticker),
         "pros_cons":       _get_pros_cons(soup, ticker),
+        # Bank-specific metrics — empty dict for non-bank tickers
+        "bank_ratios":     bank_ratios,
     }
