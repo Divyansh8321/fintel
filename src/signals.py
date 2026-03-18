@@ -796,6 +796,8 @@ def _compute_dcf(data):
         "dcf_verdict":                None,
         "dcf_stage1_growth":          None,
         "dcf_fcf_base":               None,
+        # Method used: "fcf_dcf" (normal) or "epv" (fallback for negative FCF)
+        "dcf_method":                 None,
     }
 
     # --- Step 1: Establish FCF base (most recent year) ---
@@ -818,13 +820,45 @@ def _compute_dcf(data):
         return result
 
     if fcf_base <= 0:
-        # Negative FCF companies cannot be valued via DCF -- too speculative
+        # --- Fallback: Earnings Power Value (EPV) for negative-FCF companies ---
+        # EPV = EPS / WACC capitalises current earnings at cost of capital assuming
+        # zero growth — a conservative floor that ignores reinvestment optionality.
+        # Negative FCF often means heavy capex investment for future growth, so EPV
+        # typically understates intrinsic value for genuine growth companies.
+        # Agents must contextualise: EPV is a floor, not a target price.
+        eps0  = _safe(pl.get("eps"), 0)
+        price = h.get("current_price")
+
+        if eps0 is None or eps0 <= 0:
+            result["dcf_intrinsic_value_reason"] = (
+                f"FCF non-positive ({round(fcf_base, 1)} cr) and EPS non-positive "
+                f"({eps0}) — neither DCF nor EPV applicable"
+            )
+            return result
+
+        epv_per_share = eps0 / _DCF_WACC
+        result["dcf_intrinsic_value"] = round(epv_per_share, 2)
+        result["dcf_method"]          = "epv"
+        result["dcf_fcf_base"]        = round(fcf_base, 2)
         result["dcf_intrinsic_value_reason"] = (
-            f"FCF base non-positive ({round(fcf_base, 1)} cr) -- DCF not applicable"
+            f"FCF non-positive ({round(fcf_base, 1)} cr) — using EPV = EPS/WACC "
+            f"({round(eps0, 2)} / {_DCF_WACC}) as conservative floor"
         )
+
+        if price is not None and price > 0:
+            mos = (epv_per_share - price) / epv_per_share
+            result["dcf_margin_of_safety"] = round(mos, 4)
+            if mos > 0.20:
+                result["dcf_verdict"] = "undervalued"
+            elif mos >= -0.20:
+                result["dcf_verdict"] = "fairly_valued"
+            else:
+                result["dcf_verdict"] = "overvalued"
+
         return result
 
     result["dcf_fcf_base"] = round(fcf_base, 2)
+    result["dcf_method"]   = "fcf_dcf"
 
     # --- Step 2: Determine stage-1 growth rate ---
     # Prefer 3yr revenue CAGR; fall back to 5yr, then 3yr profit CAGR.

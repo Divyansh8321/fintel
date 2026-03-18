@@ -196,6 +196,13 @@ def analyze(data: dict, signals: dict, news: dict | None) -> dict:
                 "ev_ebitda": val.get("ev_ebitda"),
                 "price_to_sales": val.get("price_to_sales"),
                 "earnings_yield_pct": val.get("earnings_yield"),
+                # DCF fields — method may be "fcf_dcf" (normal) or "epv" (negative-FCF fallback)
+                "dcf_intrinsic_value": val.get("dcf_intrinsic_value"),
+                "dcf_method": val.get("dcf_method"),
+                "dcf_margin_of_safety_pct": round(val.get("dcf_margin_of_safety", 0) * 100, 1)
+                    if val.get("dcf_margin_of_safety") is not None else None,
+                "dcf_verdict": val.get("dcf_verdict"),
+                "dcf_note": val.get("dcf_intrinsic_value_reason") if val.get("dcf_method") == "epv" else None,
             },
             "owner_earnings": {
                 "owner_earnings_cr": oe["owner_earnings_cr"],
@@ -250,14 +257,19 @@ def analyze(data: dict, signals: dict, news: dict | None) -> dict:
             "CRITICAL RULES:\n"
             "1. All numerical signals have been pre-computed in Python. Do NOT "
             "   recompute or second-guess them. If a value is null, say so.\n"
-            "2. Your score (1–10) must follow from the signals provided:\n"
+            "2. DCF method: if dcf_method='epv', the intrinsic value is an Earnings "
+            "   Power Value (EPS/WACC) — a zero-growth floor because FCF was negative. "
+            "   EPV understates value for genuine growth companies. Flag this clearly in "
+            "   your thesis and do not penalise the score purely for a negative DCF "
+            "   margin of safety when EPV was the method.\n"
+            "3. Your score (1–10) must follow from the signals provided:\n"
             "   9–10 = deep value, high margin of safety, strong balance sheet\n"
             "   7–8  = fair value, decent quality\n"
             "   5–6  = fairly valued or mixed signals\n"
             "   3–4  = overvalued or balance sheet concern\n"
             "   1–2  = significant overvaluation or major red flag\n"
-            "3. Return ONLY valid JSON matching the schema. No prose outside JSON.\n"
-            "4. key_signals must be 3 specific data points (e.g. "
+            "4. Return ONLY valid JSON matching the schema. No prose outside JSON.\n"
+            "5. key_signals must be 3 specific data points (e.g. "
             "   'Graham Number ₹450 vs price ₹380 — 16% discount').\n"
         )
 
