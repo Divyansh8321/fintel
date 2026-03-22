@@ -118,8 +118,9 @@ def analyze(data: dict, signals: dict, news: dict | None) -> dict:
 
         # --- Build compact payload for GPT-4o ---
         payload = {
-            "company": data.get("header", {}).get("name", "Unknown"),
-            "sector":  data.get("header", {}).get("sector", "Unknown"),
+            "company":      data.get("header", {}).get("name", "Unknown"),
+            "sector":       data.get("header", {}).get("sector", "Unknown"),
+            "company_type": "bank_or_nbfc" if data.get("is_bank") else "non_financial",
             "current_price_inr": data.get("header", {}).get("current_price"),
             "capital_efficiency": {
                 "roce_latest_pct":  spread["roce_latest"],

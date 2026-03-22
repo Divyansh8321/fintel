@@ -147,8 +147,9 @@ def analyze(data: dict, signals: dict, news: dict | None) -> dict:
         # Contrarian payload is deliberately risk-focused — only the signals
         # that surface stress, distress, or governance concerns.
         payload = {
-            "company":  data.get("header", {}).get("name", "Unknown"),
-            "sector":   data.get("header", {}).get("sector", "Unknown"),
+            "company":      data.get("header", {}).get("name", "Unknown"),
+            "sector":       data.get("header", {}).get("sector", "Unknown"),
+            "company_type": "bank_or_nbfc" if data.get("is_bank") else "non_financial",
             "current_price_inr": data.get("header", {}).get("current_price"),
             "promoter_risk": {
                 "pledged_pct":             pr.get("pledged_pct"),

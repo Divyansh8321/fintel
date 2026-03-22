@@ -124,8 +124,9 @@ def analyze(data: dict, signals: dict, news: dict | None) -> dict:
 
         # --- Build compact payload for GPT-4o ---
         payload = {
-            "company": data.get("header", {}).get("name", "Unknown"),
-            "sector":  data.get("header", {}).get("sector", "Unknown"),
+            "company":      data.get("header", {}).get("name", "Unknown"),
+            "sector":       data.get("header", {}).get("sector", "Unknown"),
+            "company_type": "bank_or_nbfc" if data.get("is_bank") else "non_financial",
             "price_momentum": {
                 "current_price_inr": w52["current_price"],
                 "high_52w_inr":      w52["high_52w"],

@@ -180,7 +180,8 @@ def analyze(data: dict, signals: dict, news: dict | None) -> dict:
         # Only the signals this lens cares about. Keep it small to reduce tokens.
         payload = {
             "company": data.get("header", {}).get("name", "Unknown"),
-            "sector": data.get("header", {}).get("sector", "Unknown"),
+            "sector":  data.get("header", {}).get("sector", "Unknown"),
+            "company_type": "bank_or_nbfc" if data.get("is_bank") else "non_financial",
             "current_price_inr": data.get("header", {}).get("current_price"),
             "valuation": {
                 "graham_number": val.get("graham_number"),
