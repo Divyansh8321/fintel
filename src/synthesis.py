@@ -118,7 +118,7 @@ def _tally_actions(notes: list[dict]) -> dict:
     return tally
 
 
-def synthesise(analyst_notes: list[dict], data: dict) -> dict:
+def synthesise(analyst_notes: list[dict], data: dict, signals: dict | None = None) -> dict:
     """
     Synthesise five analyst notes into a consensus verdict.
 
@@ -154,8 +154,10 @@ def synthesise(analyst_notes: list[dict], data: dict) -> dict:
             f"got: {type(analyst_notes)}"
         )
 
-    company = data.get("header", {}).get("name", "Unknown Company")
-    sector  = data.get("header", {}).get("sector", "Unknown Sector")
+    company  = data.get("header", {}).get("name", "Unknown Company")
+    sector   = data.get("header", {}).get("sector", "Unknown Sector")
+    is_bank  = data.get("is_bank", False)
+    bank_sig = (signals or {}).get("bank_signals") if is_bank else None
 
     # --- Python: compute weighted score and action tally ---
     score_result = _compute_weighted_score(analyst_notes)
@@ -184,12 +186,44 @@ def synthesise(analyst_notes: list[dict], data: dict) -> dict:
     payload = {
         "company":        company,
         "sector":         sector,
+        "is_bank":        is_bank,
         "weighted_score": score_result["weighted_score"],
         "action_tally":   action_tally,
         "analyst_notes":  notes_for_llm,
     }
 
+    # For banks, include key bank-specific metrics directly in the payload so
+    # the synthesis CIO can reference them even if individual agents missed them.
+    if is_bank and bank_sig:
+        payload["bank_context"] = {
+            "gross_npa_pct":      bank_sig.get("gross_npa_pct"),
+            "net_npa_pct":        bank_sig.get("net_npa_pct"),
+            "npa_flag":           bank_sig.get("npa_flag"),
+            "nim_pct":            bank_sig.get("nim_pct"),
+            "car_pct":            bank_sig.get("car_pct"),
+            "car_vs_minimum":     bank_sig.get("car_vs_minimum"),
+            "price_to_book":      bank_sig.get("price_to_book"),
+            "roe_latest":         bank_sig.get("roe_latest"),
+            "deposit_growth_pct": bank_sig.get("deposit_growth_pct"),
+            "note": (
+                "Piotroski F-Score is NOT applicable for this bank/NBFC — "
+                "model was designed for non-financials. Do not reference it."
+            ),
+        }
+
     # --- System prompt: synthesis chair, not an analyst ---
+    bank_addendum = ""
+    if is_bank:
+        bank_addendum = (
+            "\n\nThis company is a BANK or NBFC. Key differences for your synthesis:\n"
+            "- Piotroski F-Score is invalid for banks — ignore any references to it.\n"
+            "- Primary valuation metric is Price-to-Book (not Graham Number or DCF).\n"
+            "- Asset quality (Gross NPA%, Net NPA%) is the single most important risk signal.\n"
+            "- NIM (Net Interest Margin) drives profitability — trend matters as much as level.\n"
+            "- Capital Adequacy Ratio (CAR) vs the 11.5% minimum shows the safety buffer.\n"
+            "- Use bank_context data in your synthesis alongside analyst notes.\n"
+        )
+
     system_prompt = (
         "You are the chief investment officer of a multi-strategy equity fund "
         "focused on Indian public companies (NSE/BSE). "
@@ -197,6 +231,7 @@ def synthesise(analyst_notes: list[dict], data: dict) -> dict:
         "a value analyst (Graham/Buffett), a growth analyst (Lynch/Fisher), "
         "a quality analyst (Munger/Pabrai), a contrarian risk analyst (Burry/Druckenmiller), "
         "and a quantitative momentum analyst. "
+        + bank_addendum +
         "\n\n"
         "Your job is to synthesise their views into three outputs:\n"
         "1. bull_case: 2–3 sentences summarising the strongest arguments FOR owning "

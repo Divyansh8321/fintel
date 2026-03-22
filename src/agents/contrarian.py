@@ -208,10 +208,13 @@ def analyze(data: dict, signals: dict, news: dict | None) -> dict:
             "CRITICAL RULES:\n"
             "1. All numerical signals have been pre-computed in Python. Do NOT "
             "   recompute or second-guess them. If a value is null, acknowledge it.\n"
-            "2. Your score (1–10): 9–10 = clean bill of health, 7–8 = minor concerns, "
+            "2. If piotroski.label is 'not_applicable', this is a bank or NBFC. "
+            "   Do NOT reference or penalise based on Piotroski score. For banks, "
+            "   focus your risk assessment on NPA quality, DSCR, and pledging instead.\n"
+            "3. Your score (1–10): 9–10 = clean bill of health, 7–8 = minor concerns, "
             "   5–6 = notable risk present, 3–4 = serious risk, 1–2 = avoid.\n"
-            "3. Return ONLY valid JSON matching the schema. No prose outside JSON.\n"
-            "4. key_signals must be 3 specific risk data points (e.g. "
+            "4. Return ONLY valid JSON matching the schema. No prose outside JSON.\n"
+            "5. key_signals must be 3 specific risk data points (e.g. "
             "   'Promoter pledging 28% — increasing trend — high flag').\n"
         )
 

@@ -861,10 +861,11 @@ def _compute_dcf(data):
     result["dcf_method"]   = "fcf_dcf"
 
     # --- Step 2: Determine stage-1 growth rate ---
-    # Prefer 3yr revenue CAGR; fall back to 5yr, then 3yr profit CAGR.
+    # Prefer 3yr sales CAGR; fall back to 5yr, then 3yr profit CAGR.
+    # Note: growth_rates keys use "sales_cagr_*" and "profit_cagr_*" (not "revenue_*").
     raw_growth = (
-        gr.get("revenue_cagr_3yr")
-        or gr.get("revenue_cagr_5yr")
+        gr.get("sales_cagr_3yr")
+        or gr.get("sales_cagr_5yr")
         or gr.get("profit_cagr_3yr")
     )
 
@@ -1371,7 +1372,20 @@ def compute_signals(data):
     else:
         wc_source = "bank — WC not applicable"
 
-    piotroski        = _compute_piotroski(data)
+    # Piotroski F-Score is not valid for banks/NBFCs — the original model was
+    # designed for manufacturing/industrial companies and its signals (inventory
+    # turns, gross margin, current ratio change) are meaningless for financials.
+    # For banks we return a sentinel dict with score=None and a clear reason so
+    # agents know not to reference or penalise based on Piotroski.
+    if is_bank:
+        piotroski = {
+            "score":  None,
+            "label":  "not_applicable",
+            "reason": "Piotroski F-Score is not valid for banks/NBFCs — model designed for non-financials",
+        }
+    else:
+        piotroski = _compute_piotroski(data)
+
     dupont           = _compute_dupont(data)
     earnings_quality = _compute_earnings_quality(data)
     growth_quality   = _compute_growth_quality(data)

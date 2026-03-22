@@ -731,6 +731,7 @@ def _get_key_ratios(soup: BeautifulSoup, ticker: str, warehouse_id: str = "") ->
     promoter_holding        = _quick("promoter holding")
     promoter_holding_change = _quick("change in prom") or _quick("prom hold change")
     industry_pe             = _quick("industry pe")
+    price_to_book           = _quick("price to book") or _quick("p/bv") or _quick("p/b")
 
     return {
         "pe":                      pe,
@@ -745,6 +746,7 @@ def _get_key_ratios(soup: BeautifulSoup, ticker: str, warehouse_id: str = "") ->
         "promoter_holding":        promoter_holding,
         "promoter_holding_change": promoter_holding_change,
         "industry_pe":             industry_pe,
+        "price_to_book":           price_to_book,
     }
 
 

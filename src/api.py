@@ -281,7 +281,7 @@ def analyze(body: AnalyzeRequest):
 
     # --- Step 5: Synthesise the 5 analyst notes into a consensus verdict ---
     try:
-        synthesis = synthesise(analyst_notes, company_data)
+        synthesis = synthesise(analyst_notes, company_data, signals)
     except RuntimeError as e:
         raise HTTPException(
             status_code=502,
