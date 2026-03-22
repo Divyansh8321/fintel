@@ -725,13 +725,22 @@ def _get_key_ratios(soup: BeautifulSoup, ticker: str, warehouse_id: str = "") ->
                 return _parse_number_or_none(v)
         return None
 
+    def _quick_first(*keywords: str) -> float | None:
+        """Return first non-None result across multiple keyword attempts.
+        Uses explicit None check so 0.0 is not treated as missing."""
+        for kw in keywords:
+            v = _quick(kw)
+            if v is not None:
+                return v
+        return None
+
     pledged_pct             = _quick("pledged")
-    ev_ebitda               = _quick("evebitda") or _quick("ev/ebitda") or _quick("ev / ebitda")
-    price_to_sales          = _quick("price to sales") or _quick("p/s")
+    ev_ebitda               = _quick_first("evebitda", "ev/ebitda", "ev / ebitda")
+    price_to_sales          = _quick_first("price to sales", "p/s")
     promoter_holding        = _quick("promoter holding")
-    promoter_holding_change = _quick("change in prom") or _quick("prom hold change")
+    promoter_holding_change = _quick_first("change in prom", "prom hold change")
     industry_pe             = _quick("industry pe")
-    price_to_book           = _quick("price to book") or _quick("p/bv") or _quick("p/b")
+    price_to_book           = _quick_first("price to book", "p/bv", "p/b")
 
     return {
         "pe":                      pe,
