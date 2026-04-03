@@ -9,18 +9,12 @@
 #          data (dict) — scraper output (for company name/sector)
 # OUTPUT:  dict: consensus_score, weighted_score, action_tally,
 #                bull_case, bear_case, verdict, analyst_notes
-# DEPENDS: openai, .env (OPENAI_API_KEY)
+# DEPENDS: src/llm.py
 # ============================================================
 
 import json
-import os
 
-from dotenv import load_dotenv
-from openai import OpenAI
-
-load_dotenv()
-
-_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+from src.llm import call_analysis_model
 
 # Synthesis weights per CLAUDE.md spec.
 # Must sum to 1.0.
@@ -38,7 +32,7 @@ _MIN_SCORE = 1
 _MAX_SCORE = 10
 
 
-def _compute_weighted_score(notes: list[dict]) -> dict:
+def compute_weighted_score(notes: list[dict]) -> dict:
     """
     Compute the weighted consensus score from analyst notes in Python.
 
@@ -100,7 +94,7 @@ def _compute_weighted_score(notes: list[dict]) -> dict:
     }
 
 
-def _tally_actions(notes: list[dict]) -> dict:
+def tally_actions(notes: list[dict]) -> dict:
     """
     Count how many analysts recommend each action (buy/hold/sell/avoid).
 
@@ -160,8 +154,8 @@ def synthesise(analyst_notes: list[dict], data: dict, signals: dict | None = Non
     bank_sig = (signals or {}).get("bank_signals") if is_bank else None
 
     # --- Python: compute weighted score and action tally ---
-    score_result = _compute_weighted_score(analyst_notes)
-    action_tally = _tally_actions(analyst_notes)
+    score_result = compute_weighted_score(analyst_notes)
+    action_tally = tally_actions(analyst_notes)
 
     # --- Build a compact payload for GPT-4o ---
     # Only pass the narrative fields — GPT-4o must not re-derive the score.
@@ -261,25 +255,21 @@ def synthesise(analyst_notes: list[dict], data: dict, signals: dict | None = Non
         f'"verdict": "<1 sentence>"}}'
     )
 
-    # --- GPT-4o synthesis call (exactly 1 call per CLAUDE.md Rule 7) ---
+    # --- Analysis model synthesis call (exactly 1 call per CLAUDE.md Rule 7) ---
     try:
-        response = _client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": user_prompt},
-            ],
-            temperature=0.2,
+        raw_str = call_analysis_model(
+            system=system_prompt,
+            user=user_prompt,
             max_tokens=600,
             response_format={"type": "json_object"},
         )
     except Exception as e:
         raise RuntimeError(
-            f"GPT-4o synthesis call failed for '{company}': {e}"
+            f"Analysis model synthesis call failed for '{company}': {e}"
         ) from e
 
-    # --- Parse GPT-4o response ---
-    raw = json.loads(response.choices[0].message.content)
+    # --- Parse response ---
+    raw = json.loads(raw_str)
 
     # --- Assemble and return the full synthesis result ---
     return {

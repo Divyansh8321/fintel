@@ -10,7 +10,7 @@
 #          signals (dict) — output of signals.py
 #          news (dict | None) — output of news.py
 # OUTPUT:  dict: lens, score, thesis, key_signals, risks, action
-# DEPENDS: openai, .env (OPENAI_API_KEY)
+# DEPENDS: src/llm.py, src/agents/base.py
 # ============================================================
 
 # Philosophy: Michael Burry's adversarial research (find the stress others miss)
@@ -21,34 +21,10 @@
 # few red flags found.
 
 import json
-import os
 
-from dotenv import load_dotenv
-from openai import OpenAI
+from src.agents.base import _safe
+from src.llm import call_analysis_model
 
-load_dotenv()
-
-_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-
-def _safe(values, idx):
-    """
-    Safely retrieve values[idx], returning None on any failure.
-
-    Args:
-        values: A list (or anything else).
-        idx:    Integer index (positive or negative).
-
-    Returns:
-        The value at that index, or None if out-of-range / not a list / None value.
-    """
-    if not isinstance(values, list) or len(values) == 0:
-        return None
-    try:
-        v = values[idx]
-        return v if v is not None else None
-    except IndexError:
-        return None
 
 
 def _compute_debt_service_coverage(data: dict) -> dict:
@@ -243,20 +219,13 @@ def analyze(data: dict, signals: dict, news: dict | None) -> dict:
             f'"risks": ["<risk 1>", "<risk 2>"], "action": "<buy|hold|sell|avoid>"}}'
         )
 
-        # --- GPT-4o call ---
-        response = _client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": user_prompt},
-            ],
-            temperature=0.2,
+        # --- Analysis model call ---
+        raw = json.loads(call_analysis_model(
+            system=system_prompt,
+            user=user_prompt,
             max_tokens=500,
             response_format={"type": "json_object"},
-        )
-
-        # --- Parse and validate response ---
-        raw = json.loads(response.choices[0].message.content)
+        ))
 
         return {
             "lens":        "contrarian",

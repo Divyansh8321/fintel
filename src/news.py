@@ -6,7 +6,7 @@
 #          within NewsAPI free tier (100 req/day).
 # INPUT:   company_name (str), ticker (str)
 # OUTPUT:  dict with articles list, sentiment, sentiment_reason
-# DEPENDS: requests, openai, .env (NEWS_API_KEY, OPENAI_API_KEY)
+# DEPENDS: requests, src/llm.py, .env (NEWS_API_KEY)
 # ============================================================
 
 import json
@@ -14,11 +14,10 @@ import os
 
 import requests
 from dotenv import load_dotenv
-from openai import OpenAI
+
+from src.llm import call_fast_model
 
 load_dotenv()
-
-_client = OpenAI()
 
 _NEWSAPI_URL = "https://newsapi.org/v2/everything"
 
@@ -121,12 +120,11 @@ def _classify_sentiment(company_name: str, ticker: str, articles: list) -> tuple
     )
 
     try:
-        completion = _client.chat.completions.create(
-            model="gpt-4o-mini",
+        raw = call_fast_model(
             messages=[{"role": "user", "content": prompt}],
+            max_tokens=150,
             temperature=0,
-        )
-        raw = completion.choices[0].message.content.strip()
+        ).strip()
         parsed = json.loads(raw)
         sentiment = parsed.get("sentiment", "neutral")
         reason = parsed.get("reason", "Could not classify sentiment.")

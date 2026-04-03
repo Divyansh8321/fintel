@@ -9,7 +9,7 @@
 #          signals (dict) — output of signals.py
 #          news (dict | None) — output of news.py
 # OUTPUT:  dict: lens, score, thesis, key_signals, risks, action
-# DEPENDS: openai, .env (OPENAI_API_KEY)
+# DEPENDS: src/llm.py, src/agents/base.py
 # ============================================================
 
 # Philosophy: Benjamin Graham's margin of safety + Warren Buffett's owner
@@ -18,38 +18,14 @@
 # quality, and treats pledged promoter shares as a near-disqualifier.
 
 import json
-import os
 
-from dotenv import load_dotenv
-from openai import OpenAI
-
-load_dotenv()
-
-_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+from src.agents.base import _safe
+from src.llm import call_analysis_model
 
 # 10-year Indian government bond yield used as the risk-free rate benchmark
 # for owner earnings yield comparison.
 _GSEC_10YR = 7.2  # percent
 
-
-def _safe(values, idx):
-    """
-    Safely retrieve values[idx], returning None on any failure.
-
-    Args:
-        values: A list (or anything else)
-        idx:    Integer index (positive or negative)
-
-    Returns:
-        The value at that index, or None if out-of-range / not a list / None.
-    """
-    if not isinstance(values, list) or len(values) == 0:
-        return None
-    try:
-        v = values[idx]
-        return v if v is not None else None
-    except IndexError:
-        return None
 
 
 def _compute_owner_earnings(data: dict) -> dict:
@@ -294,20 +270,13 @@ def analyze(data: dict, signals: dict, news: dict | None) -> dict:
             f'"risks": ["<risk 1>", "<risk 2>"], "action": "<buy|hold|sell|avoid>"}}'
         )
 
-        # --- GPT-4o call ---
-        response = _client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": user_prompt},
-            ],
-            temperature=0.2,
+        # --- Analysis model call ---
+        raw = json.loads(call_analysis_model(
+            system=system_prompt,
+            user=user_prompt,
             max_tokens=500,
             response_format={"type": "json_object"},
-        )
-
-        # --- Parse and validate response ---
-        raw = json.loads(response.choices[0].message.content)
+        ))
 
         # Ensure required keys are present; fill defaults if GPT omitted any
         return {

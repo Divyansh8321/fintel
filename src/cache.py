@@ -4,7 +4,7 @@
 #          company data. Prevents redundant scraping when the
 #          same ticker is requested multiple times in a day.
 # INPUT:   ticker (str), data (dict)
-# OUTPUT:  dict or None
+# OUTPUT:  tuple[dict, str] or None  (dict + fetched_at ISO string)
 # DEPENDS: stdlib sqlite3, json, datetime — no extra deps
 # ============================================================
 
@@ -48,7 +48,7 @@ def init_db() -> None:
         conn.commit()
 
 
-def get_cached(ticker: str) -> dict | None:
+def get_cached(ticker: str) -> tuple[dict, str] | None:
     """
     Returns cached company data for the ticker if it exists and is fresh.
 
@@ -60,7 +60,9 @@ def get_cached(ticker: str) -> dict | None:
                 callers should normalise to uppercase before calling.
 
     Returns:
-        The cached dict if a fresh entry exists, or None on cache miss.
+        Tuple of (cached_dict, fetched_at_iso_str) if a fresh entry exists,
+        or None on cache miss. The fetched_at string is a UTC ISO-8601 string
+        that callers can use to compute staleness.
 
     Raises:
         sqlite3.OperationalError: if the table does not exist (init_db
@@ -90,7 +92,7 @@ def get_cached(ticker: str) -> dict | None:
     # Guard against DB corruption — treat a bad JSON row as a cache miss
     # and delete it so the next request re-populates it cleanly.
     try:
-        return json.loads(data_json)
+        return json.loads(data_json), fetched_at_str
     except json.JSONDecodeError:
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute("DELETE FROM cache WHERE ticker = ?", (ticker,))

@@ -20,6 +20,7 @@
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Optional
 
 import requests as req_lib
@@ -220,34 +221,39 @@ def analyze(body: AnalyzeRequest):
 
     Returns:
         JSON dict with keys:
-            source          (str)  — "cache" or "live"
-            data            (dict) — full output of fetch_company_data()
-            signals         (dict) — output of compute_signals()
-            news            (dict) — output of fetch_news(), or None
-            analyst_notes   (list) — list of 5 agent output dicts
-            synthesis       (dict) — output of synthesise(): weighted score,
-                                     bull/bear case, verdict
-            filings         (dict) — output of fetch_filings(): BSE announcements
-                                     + gpt-4o-mini summaries, or None
+            source           (str)   — "cache" or "live"
+            scraped_at       (str)   — UTC ISO-8601 timestamp of when data was scraped
+            cache_age_hours  (float) — hours since data was scraped (0.0 for live)
+            data             (dict)  — full output of fetch_company_data()
+            signals          (dict)  — output of compute_signals()
+            news             (dict)  — output of fetch_news(), or None
+            analyst_notes    (list)  — list of 5 agent output dicts
+            synthesis        (dict)  — output of synthesise(): weighted score,
+                                      bull/bear case, verdict; null if both
+                                      synthesis attempts failed
+            filings          (dict)  — output of fetch_filings(): BSE announcements
+                                      + gpt-4o-mini summaries, or None
 
     Raises:
         400: if the ticker is not found on Screener.in or any required field
              is missing from the scraped data (ValueError from scraper).
         503: if Screener.in authentication fails (RuntimeError) or a network
              error occurs while fetching the page.
-        502: if the OpenAI synthesis call fails (agent failures are non-fatal).
     """
     ticker = body.ticker.strip().upper()
 
     # --- Cache hit: return immediately but still record the history entry ---
     cached = get_cached(ticker)
     if cached is not None:
+        cached_data, fetched_at_str = cached
+        fetched_at = datetime.fromisoformat(fetched_at_str)
+        age_hours = round((datetime.now(timezone.utc) - fetched_at).total_seconds() / 3600, 1)
         # Record even cache-served views so history shows all lookups
         try:
-            save_analysis(ticker, cached)
+            save_analysis(ticker, cached_data)
         except Exception as e:
             print(f"Warning: memory write failed for '{ticker}': {e}")
-        return {"source": "cache", **cached}
+        return {"source": "cache", "scraped_at": fetched_at_str, "cache_age_hours": age_hours, **cached_data}
 
     # --- Step 1: Scrape Screener.in ---
     try:
@@ -262,8 +268,10 @@ def analyze(body: AnalyzeRequest):
             detail=f"Network error while fetching data for '{ticker}': {e}",
         )
 
+    scraped_at = datetime.now(timezone.utc).isoformat()
+
     # --- Step 2: Compute quantitative signals (pure Python, no network) ---
-    signals = compute_signals(company_data)
+    signals = compute_signals(company_data)  # NOTE: mutates company_data["balance_sheet"] WC rows in-place
 
     # --- Step 3: Fetch news (non-blocking — failure returns None) ---
     news = None
@@ -280,18 +288,16 @@ def analyze(body: AnalyzeRequest):
     analyst_notes = _run_agents_parallel(company_data, signals, news)
 
     # --- Step 5: Synthesise the 5 analyst notes into a consensus verdict ---
-    try:
-        synthesis = synthesise(analyst_notes, company_data, signals)
-    except RuntimeError as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"OpenAI synthesis call failed for '{ticker}': {e}",
-        )
-    except OpenAIError as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"OpenAI API error during synthesis for '{ticker}': {e}",
-        )
+    # Retry once on failure; if both attempts fail, return partial result with synthesis=None
+    # rather than raising 502 — all agent work is preserved in the response.
+    synthesis = None
+    for attempt in range(2):
+        try:
+            synthesis = synthesise(analyst_notes, company_data, signals)
+            break
+        except (RuntimeError, OpenAIError) as e:
+            if attempt == 1:
+                print(f"Warning: synthesis failed after 2 attempts for '{ticker}': {e}")
 
     # --- Step 6: Fetch BSE filings (non-blocking — failure captured in error field) ---
     # bse_code comes from the scraper header (extracted from the Screener company page).
@@ -308,6 +314,8 @@ def analyze(body: AnalyzeRequest):
         print(f"Warning: no BSE code found for '{ticker}' — skipping filings.")
 
     result = {
+        "scraped_at":     scraped_at,
+        "cache_age_hours": 0.0,
         "data":           company_data,
         "signals":        signals,
         "news":           news,

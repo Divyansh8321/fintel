@@ -9,7 +9,7 @@
 #          signals (dict) — output of signals.py
 #          news (dict | None) — output of news.py
 # OUTPUT:  dict: lens, score, thesis, key_signals, risks, action
-# DEPENDS: openai, .env (OPENAI_API_KEY)
+# DEPENDS: src/llm.py
 # ============================================================
 
 # Philosophy: Quantitative momentum investing — the empirical observation that
@@ -19,14 +19,8 @@
 # positive news sentiment is a strong momentum buy.
 
 import json
-import os
 
-from dotenv import load_dotenv
-from openai import OpenAI
-
-load_dotenv()
-
-_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+from src.llm import call_analysis_model
 
 
 def _compute_52w_position(data: dict) -> dict:
@@ -209,20 +203,13 @@ def analyze(data: dict, signals: dict, news: dict | None) -> dict:
             f'"risks": ["<risk 1>", "<risk 2>"], "action": "<buy|hold|sell|avoid>"}}'
         )
 
-        # --- GPT-4o call ---
-        response = _client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": user_prompt},
-            ],
-            temperature=0.2,
+        # --- Analysis model call ---
+        raw = json.loads(call_analysis_model(
+            system=system_prompt,
+            user=user_prompt,
             max_tokens=500,
             response_format={"type": "json_object"},
-        )
-
-        # --- Parse and validate response ---
-        raw = json.loads(response.choices[0].message.content)
+        ))
 
         return {
             "lens":        "momentum",

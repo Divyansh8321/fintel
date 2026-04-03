@@ -5,23 +5,16 @@
 #          Provides the "Recent filings" section of the research brief.
 # INPUT:   bse_code (str) — e.g. "500325" for Reliance
 # OUTPUT:  dict with list of filings, each with title/date/summary
-# DEPENDS: requests, pdfplumber, openai, src/cache.py,
-#          .env (OPENAI_API_KEY)
+# DEPENDS: requests, pdfplumber, src/cache.py, src/llm.py
 # ============================================================
 
 import io
-import os
 
 import pdfplumber
 import requests
-from dotenv import load_dotenv
-from openai import OpenAI
 
 from src.cache import get_cached, set_cached
-
-load_dotenv()
-
-_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+from src.llm import call_fast_model
 
 # BSE announcements API — undocumented; Referer header required or requests are rejected.
 _BSE_ANNOUNCEMENTS_URL = (
@@ -225,10 +218,9 @@ def _summarise_pdf(pdf_url: str, title: str) -> str | None:
     # Truncate to control gpt-4o-mini token cost.
     text = text[:_MAX_TEXT_CHARS]
 
-    # --- Call gpt-4o-mini for a concise 3-sentence summary ---
+    # --- Call fast model for a concise 3-sentence summary ---
     try:
-        completion = _client.chat.completions.create(
-            model="gpt-4o-mini",
+        return call_fast_model(
             messages=[
                 {
                     "role": "system",
@@ -245,9 +237,8 @@ def _summarise_pdf(pdf_url: str, title: str) -> str | None:
                     "content": f"Filing title: {title}\n\n{text}",
                 },
             ],
-            temperature=0.1,
             max_tokens=200,
-        )
-        return completion.choices[0].message.content.strip()
+            temperature=0.1,
+        ).strip()
     except Exception:
         return None
