@@ -2,14 +2,13 @@
 # FILE: src/agents/value.py
 # PURPOSE: Value analyst agent — Graham/Buffett investing lens.
 #          Evaluates a stock through margin of safety, owner
-#          earnings, and debt discipline. Pre-computes owner
-#          earnings in Python, then asks GPT-4o to interpret
-#          signals from this lens. Never re-computes signals.
-# INPUT:   data (dict) — scraper output
-#          signals (dict) — output of signals.py
+#          earnings, and debt discipline. Reads pre-computed owner
+#          earnings from signals.owner_earnings, then asks GPT-4o
+#          to interpret signals from this lens. Never re-computes signals.
+# INPUT:   signals (SignalsModel) — output of signals.py
 #          news (dict | None) — output of news.py
 # OUTPUT:  dict: lens, score, thesis, key_signals, risks, action
-# DEPENDS: src/llm.py, src/agents/base.py
+# DEPENDS: src/llm.py, src/models.py
 # ============================================================
 
 # Philosophy: Benjamin Graham's margin of safety + Warren Buffett's owner
@@ -19,115 +18,29 @@
 
 import json
 
-from src.agents.base import _safe
 from src.llm import call_analysis_model
+from src.models import SignalsModel
 
 # 10-year Indian government bond yield used as the risk-free rate benchmark
-# for owner earnings yield comparison.
+# for owner earnings yield comparison. Kept here for the payload construction
+# below; the authoritative value lives in signals.py as _GSEC_10YR.
 _GSEC_10YR = 7.2  # percent
 
 
-
-def _compute_owner_earnings(data: dict) -> dict:
-    """
-    Compute Buffett's Owner Earnings from scraper data.
-
-    Owner Earnings = Net Income + Depreciation + CapEx (negative) - ΔWorking Capital
-    ΔWC = (Trade Receivables + Inventories - Trade Payables)_current
-          - (Trade Receivables + Inventories - Trade Payables)_prior
-
-    All values are in INR Cr (same scale as P&L).
-
-    Args:
-        data: Full scraper output dict.
-
-    Returns:
-        dict with keys: owner_earnings_cr, owner_earnings_per_share,
-        owner_earnings_yield_pct, oe_reason (None if computed, str if skipped).
-    """
-    result = {
-        "owner_earnings_cr": None,
-        "owner_earnings_per_share": None,
-        "owner_earnings_yield_pct": None,
-        "oe_reason": None,
-    }
-
-    pl = data.get("pl_table", {})
-    cf = data.get("cash_flow", {})
-    bs = data.get("balance_sheet", {})
-    hdr = data.get("header", {})
-
-    # --- Gather components ---
-    ni = _safe(pl.get("net_profit"), 0)
-    dep = _safe(pl.get("depreciation"), 0)
-    capex = _safe(cf.get("capex"), 0)          # negative = outflow
-    price = hdr.get("current_price")
-    mktcap = hdr.get("market_cap")             # INR Cr
-
-    # Validate essentials
-    if ni is None:
-        result["oe_reason"] = "net_profit unavailable"
-        return result
-    if dep is None:
-        result["oe_reason"] = "depreciation unavailable"
-        return result
-    if capex is None:
-        result["oe_reason"] = "capex unavailable"
-        return result
-    if not price or price <= 0:
-        result["oe_reason"] = "current_price unavailable"
-        return result
-    if not mktcap or mktcap <= 0:
-        result["oe_reason"] = "market_cap unavailable"
-        return result
-
-    # --- Compute ΔWorking Capital (optional — skip if data missing) ---
-    # WC = Trade Receivables + Inventories - Trade Payables
-    tr0 = _safe(bs.get("trade_receivables"), 0)
-    tr1 = _safe(bs.get("trade_receivables"), 1)
-    inv0 = _safe(bs.get("inventories"), 0)
-    inv1 = _safe(bs.get("inventories"), 1)
-    tp0 = _safe(bs.get("trade_payables"), 0)
-    tp1 = _safe(bs.get("trade_payables"), 1)
-
-    delta_wc = 0.0
-    if all(v is not None for v in [tr0, tr1, inv0, inv1, tp0, tp1]):
-        wc_current = tr0 + inv0 - tp0
-        wc_prior   = tr1 + inv1 - tp1
-        delta_wc   = wc_current - wc_prior
-
-    # --- Owner Earnings ---
-    # capex is negative (outflow), so + capex subtracts it from earnings.
-    oe = ni + dep + capex - delta_wc
-
-    # --- Per share and yield ---
-    # market_cap is in INR Cr; price is in INR.
-    # shares (in units) = (mktcap * 1e7) / price
-    shares = (mktcap * 1e7) / price
-    oe_per_share = oe * 1e7 / shares          # convert Cr back to INR per share
-    oe_yield = (oe_per_share / price) * 100   # as percent
-
-    result["owner_earnings_cr"] = round(oe, 2)
-    result["owner_earnings_per_share"] = round(oe_per_share, 2)
-    result["owner_earnings_yield_pct"] = round(oe_yield, 2)
-    return result
-
-
-def analyze(data: dict, signals: dict, news: dict | None) -> dict:
+def analyze(signals: SignalsModel, news: dict | None) -> dict:
     """
     Value analyst agent — Graham/Buffett investing lens.
 
-    Pre-computes owner earnings in Python, then sends a compact payload
-    of pre-computed signals to GPT-4o asking it to evaluate the stock
-    from a deep value perspective.
+    Reads pre-computed owner earnings from signals.owner_earnings, then sends
+    a compact payload of pre-computed signals to GPT-4o asking it to evaluate
+    the stock from a deep value perspective.
 
     All numerical signals have been computed by signals.py. This function
     does NOT ask GPT-4o to recompute or second-guess them — only to interpret
     them through the value investing lens and assign a conviction score.
 
     Args:
-        data:    Full scraper output from fetch_company_data().
-        signals: Pre-computed signal dict from compute_signals().
+        signals: Pre-computed SignalsModel from compute_signals().
         news:    News + sentiment dict from fetch_news(), or None.
 
     Returns:
@@ -142,73 +55,73 @@ def analyze(data: dict, signals: dict, news: dict | None) -> dict:
         On any failure, returns {"lens": "value", "error": str(e)}.
     """
     try:
-        # --- Extract relevant sub-dicts from pre-computed signals ---
-        val = signals.get("valuation", {})
-        eq  = signals.get("earnings_quality", {})
-        bsh = signals.get("balance_sheet_health", {})
-        pit = signals.get("piotroski", {})
-        pr  = signals.get("promoter_risk", {})
-
-        # --- Python pre-computation: owner earnings (not in signals.py yet) ---
-        oe = _compute_owner_earnings(data)
+        # --- Extract relevant sub-models from pre-computed signals ---
+        val = signals.valuation
+        eq  = signals.earnings_quality
+        bsh = signals.balance_sheet_health
+        pit = signals.piotroski
+        pr  = signals.promoter_risk
+        oe  = signals.owner_earnings
 
         # --- Build compact payload for GPT-4o ---
         # Only the signals this lens cares about. Keep it small to reduce tokens.
         payload = {
-            "company": data.get("header", {}).get("name", "Unknown"),
-            "sector":  data.get("header", {}).get("sector", "Unknown"),
-            "company_type": "bank_or_nbfc" if data.get("is_bank") else "non_financial",
-            "current_price_inr": data.get("header", {}).get("current_price"),
+            "company": signals.meta.name,
+            "sector":  signals.meta.sector,
+            "company_type": "bank_or_nbfc" if signals.meta.is_bank else "non_financial",
+            "current_price_inr": signals.meta.current_price,
             "valuation": {
-                "graham_number": val.get("graham_number"),
-                "price_to_graham_pct": round(val.get("price_to_graham", 0) * 100, 1)
-                    if val.get("price_to_graham") is not None else None,
-                "graham_verdict": val.get("graham_verdict"),
-                "pe_current": val.get("pe_current"),
-                "industry_pe": val.get("industry_pe"),
+                "graham_number": val.graham_number if val else None,
+                "price_to_graham_pct": round(val.price_to_graham * 100, 1)
+                    if val and val.price_to_graham is not None else None,
+                "graham_verdict": val.graham_verdict if val else None,
+                "pe_current": val.pe_current if val else None,
+                "industry_pe": val.industry_pe if val else None,
                 "pe_vs_industry": (
-                    round(val.get("pe_current") / val.get("industry_pe"), 2)
-                    if val.get("pe_current") and val.get("industry_pe") else None
+                    round(val.pe_current / val.industry_pe, 2)
+                    if val and val.pe_current and val.industry_pe else None
                 ),
-                "ev_ebitda": val.get("ev_ebitda"),
-                "price_to_sales": val.get("price_to_sales"),
-                "earnings_yield_pct": val.get("earnings_yield"),
+                "ev_ebitda": val.ev_ebitda if val else None,
+                "price_to_sales": val.price_to_sales if val else None,
+                "earnings_yield_pct": val.earnings_yield if val else None,
                 # DCF fields — method may be "fcf_dcf" (normal) or "epv" (negative-FCF fallback)
-                "dcf_intrinsic_value": val.get("dcf_intrinsic_value"),
-                "dcf_method": val.get("dcf_method"),
-                "dcf_margin_of_safety_pct": round(val.get("dcf_margin_of_safety", 0) * 100, 1)
-                    if val.get("dcf_margin_of_safety") is not None else None,
-                "dcf_verdict": val.get("dcf_verdict"),
-                "dcf_note": val.get("dcf_intrinsic_value_reason") if val.get("dcf_method") == "epv" else None,
+                "dcf_intrinsic_value": val.dcf_intrinsic_value if val else None,
+                "dcf_method": val.dcf_method if val else None,
+                "dcf_margin_of_safety_pct": round(val.dcf_margin_of_safety * 100, 1)
+                    if val and val.dcf_margin_of_safety is not None else None,
+                # dcf_verdict not stored in ValuationModel (filtered at construction)
+                "dcf_verdict": None,
+                "dcf_note": val.dcf_intrinsic_value_reason
+                    if val and val.dcf_method == "epv" else None,
             },
             "owner_earnings": {
-                "owner_earnings_cr": oe["owner_earnings_cr"],
-                "owner_earnings_per_share_inr": oe["owner_earnings_per_share"],
-                "owner_earnings_yield_pct": oe["owner_earnings_yield_pct"],
+                "owner_earnings_cr": oe.owner_earnings_cr if oe else None,
+                "owner_earnings_per_share_inr": oe.owner_earnings_per_share if oe else None,
+                "owner_earnings_yield_pct": oe.owner_earnings_yield_pct if oe else None,
                 "oe_vs_gsec_10yr": (
-                    round(oe["owner_earnings_yield_pct"] - _GSEC_10YR, 2)
-                    if oe["owner_earnings_yield_pct"] is not None else None
+                    round(oe.owner_earnings_yield_pct - _GSEC_10YR, 2)
+                    if oe and oe.owner_earnings_yield_pct is not None else None
                 ),
-                "oe_reason": oe["oe_reason"],
+                "oe_reason": oe.oe_reason if oe else None,
             },
             "earnings_quality": {
-                "quality_flag": eq.get("quality_flag"),
-                "ocf_to_net_profit": eq.get("ocf_to_net_profit"),
-                "fcf_to_net_profit": eq.get("fcf_to_net_profit"),
+                "quality_flag": eq.quality_flag if eq else None,
+                "ocf_to_net_profit": eq.ocf_to_net_profit if eq else None,
+                "fcf_to_net_profit": eq.fcf_to_net_profit if eq else None,
             },
             "balance_sheet": {
-                "debt_to_equity": bsh.get("debt_to_equity_latest"),
-                "debt_trend": bsh.get("debt_trend"),
-                "interest_coverage": bsh.get("interest_coverage"),
+                "debt_to_equity": bsh.debt_to_equity_latest if bsh else None,
+                "debt_trend": bsh.debt_trend if bsh else None,
+                "interest_coverage": bsh.interest_coverage if bsh else None,
             },
             "piotroski": {
-                "score": pit.get("score"),
-                "label": pit.get("label"),
+                "score": pit.score if pit else None,
+                "label": pit.label if pit else None,
             },
             "promoter_risk": {
-                "pledged_pct": pr.get("pledged_pct"),
-                "pledge_flag": pr.get("pledge_flag"),
-                "pledge_trend": pr.get("pledge_trend"),
+                "pledged_pct": pr.pledged_pct if pr else None,
+                "pledge_flag": pr.pledge_flag if pr else None,
+                "pledge_trend": pr.pledge_trend if pr else None,
             },
             "news_sentiment": news.get("sentiment") if news else None,
             "gsec_10yr_yield_pct": _GSEC_10YR,

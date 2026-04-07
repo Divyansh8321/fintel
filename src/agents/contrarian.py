@@ -3,14 +3,13 @@
 # PURPOSE: Contrarian analyst agent — Burry/Druckenmiller lens.
 #          Surfaces risks others ignore: pledging, debt stress,
 #          earnings quality gaps, and cash flow deterioration.
-#          Pre-computes debt service coverage in Python, then asks
-#          GPT-4o to assess downside risk from this lens.
+#          Reads pre-computed debt service coverage from signals.dscr,
+#          then asks GPT-4o to assess downside risk from this lens.
 #          Never re-computes signals.
-# INPUT:   data (dict) — scraper output
-#          signals (dict) — output of signals.py
+# INPUT:   signals (SignalsModel) — output of signals.py
 #          news (dict | None) — output of news.py
 # OUTPUT:  dict: lens, score, thesis, key_signals, risks, action
-# DEPENDS: src/llm.py, src/agents/base.py
+# DEPENDS: src/llm.py, src/models.py
 # ============================================================
 
 # Philosophy: Michael Burry's adversarial research (find the stress others miss)
@@ -22,67 +21,16 @@
 
 import json
 
-from src.agents.base import _safe
 from src.llm import call_analysis_model
+from src.models import SignalsModel
 
 
-
-def _compute_debt_service_coverage(data: dict) -> dict:
-    """
-    Compute Debt Service Coverage Ratio (DSCR) from scraper data.
-
-    DSCR = Operating Cash Flow / Interest Expense
-    DSCR >= 2.0 = comfortable; DSCR < 1.0 = distress (can't cover interest from ops).
-
-    Args:
-        data: Full scraper output dict.
-
-    Returns:
-        dict with keys: dscr (float|None), dscr_verdict (str|None),
-        dscr_reason (str|None).
-    """
-    result = {"dscr": None, "dscr_verdict": None, "dscr_reason": None}
-
-    cf = data.get("cash_flow", {})
-    pl = data.get("pl_table", {})
-
-    ocf      = _safe(cf.get("operating"), 0)
-    interest = _safe(pl.get("interest"), 0)
-
-    if ocf is None:
-        result["dscr_reason"] = "operating cash flow unavailable"
-        return result
-    if interest is None:
-        result["dscr_reason"] = "interest expense unavailable"
-        return result
-    if interest <= 0:
-        # Zero or negative interest means debt-free or negligible debt — great signal.
-        result["dscr"] = None
-        result["dscr_verdict"] = "debt_free_or_negligible"
-        result["dscr_reason"] = f"interest expense = {interest} (near zero — debt is minimal)"
-        return result
-
-    dscr = ocf / interest
-    result["dscr"] = round(dscr, 2)
-
-    if dscr >= 3.0:
-        result["dscr_verdict"] = "comfortable"
-    elif dscr >= 1.5:
-        result["dscr_verdict"] = "adequate"
-    elif dscr >= 1.0:
-        result["dscr_verdict"] = "tight"
-    else:
-        result["dscr_verdict"] = "distress"
-
-    return result
-
-
-def analyze(data: dict, signals: dict, news: dict | None) -> dict:
+def analyze(signals: SignalsModel, news: dict | None) -> dict:
     """
     Contrarian analyst agent — Burry/Druckenmiller investing lens.
 
-    Pre-computes debt service coverage in Python, then sends a compact
-    payload focused on downside risks to GPT-4o asking it to evaluate
+    Reads pre-computed debt service coverage from signals.dscr, then sends a
+    compact payload focused on downside risks to GPT-4o asking it to evaluate
     the stock from an adversarial, risk-first perspective.
 
     All numerical signals have been computed by signals.py. This function
@@ -93,8 +41,7 @@ def analyze(data: dict, signals: dict, news: dict | None) -> dict:
     all other agents — score represents conviction to own, not level of risk.
 
     Args:
-        data:    Full scraper output from fetch_company_data().
-        signals: Pre-computed signal dict from compute_signals().
+        signals: Pre-computed SignalsModel from compute_signals().
         news:    News + sentiment dict from fetch_news(), or None.
 
     Returns:
@@ -109,54 +56,52 @@ def analyze(data: dict, signals: dict, news: dict | None) -> dict:
         On any failure, returns {"lens": "contrarian", "error": str(e)}.
     """
     try:
-        # --- Extract relevant sub-dicts from pre-computed signals ---
-        pr  = signals.get("promoter_risk", {})
-        bsh = signals.get("balance_sheet_health", {})
-        eq  = signals.get("earnings_quality", {})
-        pit = signals.get("piotroski", {})
-        qm  = signals.get("quarterly_momentum", {})
-
-        # --- Python pre-computation: Debt Service Coverage Ratio ---
-        dscr = _compute_debt_service_coverage(data)
+        # --- Extract relevant sub-models from pre-computed signals ---
+        pr   = signals.promoter_risk
+        bsh  = signals.balance_sheet_health
+        eq   = signals.earnings_quality
+        pit  = signals.piotroski
+        qm   = signals.quarterly_momentum
+        dscr = signals.dscr
 
         # --- Build compact payload for GPT-4o ---
         # Contrarian payload is deliberately risk-focused — only the signals
         # that surface stress, distress, or governance concerns.
         payload = {
-            "company":      data.get("header", {}).get("name", "Unknown"),
-            "sector":       data.get("header", {}).get("sector", "Unknown"),
-            "company_type": "bank_or_nbfc" if data.get("is_bank") else "non_financial",
-            "current_price_inr": data.get("header", {}).get("current_price"),
+            "company":      signals.meta.name,
+            "sector":       signals.meta.sector,
+            "company_type": "bank_or_nbfc" if signals.meta.is_bank else "non_financial",
+            "current_price_inr": signals.meta.current_price,
             "promoter_risk": {
-                "pledged_pct":             pr.get("pledged_pct"),
-                "pledge_flag":             pr.get("pledge_flag"),
-                "pledge_trend":            pr.get("pledge_trend"),
-                "promoter_holding":        pr.get("promoter_holding"),
-                "promoter_holding_change": pr.get("promoter_holding_change"),
+                "pledged_pct":             pr.pledged_pct if pr else None,
+                "pledge_flag":             pr.pledge_flag if pr else None,
+                "pledge_trend":            pr.pledge_trend if pr else None,
+                "promoter_holding":        pr.promoter_holding if pr else None,
+                "promoter_holding_change": pr.promoter_holding_change if pr else None,
             },
             "balance_sheet_stress": {
-                "debt_to_equity":    bsh.get("debt_to_equity_latest"),
-                "debt_trend":        bsh.get("debt_trend"),
-                "interest_coverage": bsh.get("interest_coverage"),
+                "debt_to_equity":    bsh.debt_to_equity_latest if bsh else None,
+                "debt_trend":        bsh.debt_trend if bsh else None,
+                "interest_coverage": bsh.interest_coverage if bsh else None,
             },
             "debt_service_coverage": {
-                "dscr":         dscr["dscr"],
-                "dscr_verdict": dscr["dscr_verdict"],
-                "dscr_reason":  dscr["dscr_reason"],
+                "dscr":         dscr.dscr if dscr else None,
+                "dscr_verdict": dscr.dscr_verdict if dscr else None,
+                "dscr_reason":  dscr.dscr_reason if dscr else None,
             },
             "earnings_quality": {
-                "quality_flag":      eq.get("quality_flag"),
-                "ocf_to_net_profit": eq.get("ocf_to_net_profit"),
-                "fcf_to_net_profit": eq.get("fcf_to_net_profit"),
+                "quality_flag":      eq.quality_flag if eq else None,
+                "ocf_to_net_profit": eq.ocf_to_net_profit if eq else None,
+                "fcf_to_net_profit": eq.fcf_to_net_profit if eq else None,
             },
             "piotroski": {
-                "score": pit.get("score"),
-                "label": pit.get("label"),
+                "score": pit.score if pit else None,
+                "label": pit.label if pit else None,
             },
             "quarterly_deceleration": {
-                "revenue_yoy_pct": qm.get("revenue_yoy_pct"),
-                "profit_yoy_pct":  qm.get("profit_yoy_pct"),
-                "opm_trend":       qm.get("opm_trend"),
+                "revenue_yoy_pct": qm.revenue_yoy_pct if qm else None,
+                "profit_yoy_pct":  qm.profit_yoy_pct if qm else None,
+                "opm_trend":       qm.opm_trend if qm else None,
             },
             "news_sentiment": news.get("sentiment") if news else None,
             "news_reason":    news.get("sentiment_reason") if news else None,

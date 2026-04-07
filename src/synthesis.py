@@ -6,15 +6,17 @@
 #          Makes exactly 1 GPT-4o call. Python computes the weighted
 #          score; GPT-4o writes the narrative synthesis only.
 # INPUT:   analyst_notes (list[dict]) — output of all 5 agent analyze()
-#          data (dict) — scraper output (for company name/sector)
+#          signals (SignalsModel) — typed signal model; metadata accessed
+#          via signals.meta.* dot-notation
 # OUTPUT:  dict: consensus_score, weighted_score, action_tally,
 #                bull_case, bear_case, verdict, analyst_notes
-# DEPENDS: src/llm.py
+# DEPENDS: src/llm.py, src/models.py
 # ============================================================
 
 import json
 
 from src.llm import call_analysis_model
+from src.models import SignalsModel
 
 # Synthesis weights per CLAUDE.md spec.
 # Must sum to 1.0.
@@ -112,7 +114,7 @@ def tally_actions(notes: list[dict]) -> dict:
     return tally
 
 
-def synthesise(analyst_notes: list[dict], data: dict, signals: dict | None = None) -> dict:
+def synthesise(analyst_notes: list[dict], signals: SignalsModel) -> dict:
     """
     Synthesise five analyst notes into a consensus verdict.
 
@@ -123,8 +125,9 @@ def synthesise(analyst_notes: list[dict], data: dict, signals: dict | None = Non
     Args:
         analyst_notes: List of 5 dicts, each the output of an agent's analyze().
                        May include error dicts if an agent failed.
-        data:          Full scraper output from fetch_company_data() — used
-                       for company name and sector context.
+        signals:       SignalsModel instance produced by compute_signals().
+                       Company metadata (name, sector, is_bank) is accessed
+                       via signals.meta.* dot-notation.
 
     Returns:
         dict with keys:
@@ -148,10 +151,10 @@ def synthesise(analyst_notes: list[dict], data: dict, signals: dict | None = Non
             f"got: {type(analyst_notes)}"
         )
 
-    company  = data.get("header", {}).get("name", "Unknown Company")
-    sector   = data.get("header", {}).get("sector", "Unknown Sector")
-    is_bank  = data.get("is_bank", False)
-    bank_sig = (signals or {}).get("bank_signals") if is_bank else None
+    company  = signals.meta.name
+    sector   = signals.meta.sector
+    is_bank  = signals.meta.is_bank
+    bank_sig = signals.bank_signals if is_bank else None
 
     # --- Python: compute weighted score and action tally ---
     score_result = compute_weighted_score(analyst_notes)
@@ -190,15 +193,15 @@ def synthesise(analyst_notes: list[dict], data: dict, signals: dict | None = Non
     # the synthesis CIO can reference them even if individual agents missed them.
     if is_bank and bank_sig:
         payload["bank_context"] = {
-            "gross_npa_pct":      bank_sig.get("gross_npa_pct"),
-            "net_npa_pct":        bank_sig.get("net_npa_pct"),
-            "npa_flag":           bank_sig.get("npa_flag"),
-            "nim_pct":            bank_sig.get("nim_pct"),
-            "car_pct":            bank_sig.get("car_pct"),
-            "car_vs_minimum":     bank_sig.get("car_vs_minimum"),
-            "price_to_book":      bank_sig.get("price_to_book"),
-            "roe_latest":         bank_sig.get("roe_latest"),
-            "deposit_growth_pct": bank_sig.get("deposit_growth_pct"),
+            "gross_npa_pct":      bank_sig.gross_npa_pct,
+            "net_npa_pct":        bank_sig.net_npa_pct,
+            "npa_flag":           bank_sig.npa_flag,
+            "nim_pct":            bank_sig.nim_pct,
+            "car_pct":            bank_sig.car_pct,
+            "car_vs_minimum":     bank_sig.car_vs_minimum,
+            "price_to_book":      bank_sig.price_to_book,
+            "roe_latest":         bank_sig.roe_latest,
+            "deposit_growth_pct": bank_sig.deposit_growth_pct,
             "note": (
                 "Piotroski F-Score is NOT applicable for this bank/NBFC — "
                 "model was designed for non-financials. Do not reference it."

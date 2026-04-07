@@ -7,11 +7,32 @@
 #          interpretation. Missing data yields None + reason,
 #          never an exception (see TRADEOFFS.md T-011).
 # INPUT:   data (dict) -- full output of fetch_company_data()
-# OUTPUT:  dict with 9 signal groups + 2 derived scores + DCF
-# DEPENDS: math (stdlib only)
+# OUTPUT:  SignalsModel (src/models.py) with 9 signal groups,
+#          5 agent pre-computations, 2 derived scores, and meta
+# DEPENDS: math (stdlib only), src/models.py
 # ============================================================
 
 import math
+
+from src.models import (
+    SignalsModel, MetaModel, PiotroskiModel, DupontModel,
+    EarningsQualityModel, GrowthQualityModel, CapitalEfficiencyModel,
+    BalanceSheetHealthModel, ValuationModel, PromoterRiskModel,
+    QuarterlyMomentumModel, BankSignalsModel,
+    PegModel, OwnerEarningsModel, DscrModel, RoceWaccModel, PriceMomentumModel,
+)
+
+# ---------------------------------------------------------------------------
+# Module-level constants (used by agent pre-computation helpers)
+# ---------------------------------------------------------------------------
+
+# 10-year Indian government bond yield used as the risk-free rate benchmark
+# for owner earnings yield comparison (value agent).
+_GSEC_10YR = 7.2  # percent
+
+# Proxy for Indian equity WACC — 10yr Gsec (7.2%) + equity risk premium (~4.8%).
+# Fixed at 12% consistent with DCF assumptions across the project (quality agent).
+_WACC_PROXY = 12.0  # percent
 
 
 # ---------------------------------------------------------------------------
@@ -1322,6 +1343,299 @@ def _compute_bank_signals(data):
 
 
 # ---------------------------------------------------------------------------
+# Agent pre-computation helpers (moved from agent files in issue #8)
+# ---------------------------------------------------------------------------
+# These functions are called by compute_signals() and their results stored on
+# SignalsModel. They replace the identical functions that previously lived in
+# each agent file, consolidating all numerical computation here per
+# CLAUDE.md Rule 1 (Python does the maths; GPT-4o explains the maths).
+
+def _compute_peg(data: dict, valuation_dict: dict) -> dict:
+    """
+    Compute the PEG (Price/Earnings to Growth) ratio.
+
+    PEG = PE / profit_cagr_3yr
+    A PEG < 1.0 signals that the stock may be cheap relative to its growth rate.
+    A PEG > 2.0 signals the growth is priced in (or overpriced).
+
+    Args:
+        data:           Full scraper output dict.
+        valuation_dict: The valuation sub-dict already computed by _compute_valuation().
+
+    Returns:
+        dict with keys: peg_ratio (float|None), peg_verdict (str|None),
+        peg_reason (str|None).
+    """
+    result = {"peg_ratio": None, "peg_verdict": None, "peg_reason": None}
+
+    pe   = valuation_dict.get("pe_current")
+    cagr = data.get("growth_rates", {}).get("profit_cagr_3yr")
+
+    if pe is None:
+        result["peg_reason"] = "PE ratio unavailable"
+        return result
+    if pe <= 0:
+        result["peg_reason"] = f"PE is non-positive ({pe})"
+        return result
+    if cagr is None:
+        result["peg_reason"] = "3-year profit CAGR unavailable"
+        return result
+    if cagr <= 0:
+        result["peg_reason"] = f"3yr profit CAGR is non-positive ({cagr}%)"
+        return result
+
+    peg = pe / cagr
+    result["peg_ratio"] = round(peg, 2)
+
+    # PEG interpretation: Lynch considered < 1.0 cheap, > 2.0 expensive
+    if peg < 1.0:
+        result["peg_verdict"] = "attractive"
+    elif peg < 2.0:
+        result["peg_verdict"] = "fair"
+    else:
+        result["peg_verdict"] = "expensive"
+
+    return result
+
+
+def _compute_owner_earnings(data: dict) -> dict:
+    """
+    Compute Buffett's Owner Earnings from scraper data.
+
+    Owner Earnings = Net Income + Depreciation + CapEx (negative) - ΔWorking Capital
+    ΔWC = (Trade Receivables + Inventories - Trade Payables)_current
+          - (Trade Receivables + Inventories - Trade Payables)_prior
+
+    All values are in INR Cr (same scale as P&L).
+
+    Args:
+        data: Full scraper output dict.
+
+    Returns:
+        dict with keys: owner_earnings_cr, owner_earnings_per_share,
+        owner_earnings_yield_pct, oe_reason (None if computed, str if skipped).
+    """
+    result = {
+        "owner_earnings_cr":        None,
+        "owner_earnings_per_share": None,
+        "owner_earnings_yield_pct": None,
+        "oe_reason":                None,
+    }
+
+    pl  = data.get("pl_table", {})
+    cf  = data.get("cash_flow", {})
+    bs  = data.get("balance_sheet", {})
+    hdr = data.get("header", {})
+
+    # --- Gather components ---
+    ni    = _safe(pl.get("net_profit"), 0)
+    dep   = _safe(pl.get("depreciation"), 0)
+    capex = _safe(cf.get("capex"), 0)   # negative = outflow
+    price  = hdr.get("current_price")
+    mktcap = hdr.get("market_cap")      # INR Cr
+
+    # Validate essentials
+    if ni is None:
+        result["oe_reason"] = "net_profit unavailable"
+        return result
+    if dep is None:
+        result["oe_reason"] = "depreciation unavailable"
+        return result
+    if capex is None:
+        result["oe_reason"] = "capex unavailable"
+        return result
+    if not price or price <= 0:
+        result["oe_reason"] = "current_price unavailable"
+        return result
+    if not mktcap or mktcap <= 0:
+        result["oe_reason"] = "market_cap unavailable"
+        return result
+
+    # --- Compute ΔWorking Capital (optional — skip if data missing) ---
+    # WC = Trade Receivables + Inventories - Trade Payables
+    tr0  = _safe(bs.get("trade_receivables"), 0)
+    tr1  = _safe(bs.get("trade_receivables"), 1)
+    inv0 = _safe(bs.get("inventories"), 0)
+    inv1 = _safe(bs.get("inventories"), 1)
+    tp0  = _safe(bs.get("trade_payables"), 0)
+    tp1  = _safe(bs.get("trade_payables"), 1)
+
+    delta_wc = 0.0
+    if all(v is not None for v in [tr0, tr1, inv0, inv1, tp0, tp1]):
+        wc_current = tr0 + inv0 - tp0
+        wc_prior   = tr1 + inv1 - tp1
+        delta_wc   = wc_current - wc_prior
+
+    # --- Owner Earnings ---
+    # capex is negative (outflow), so + capex subtracts it from earnings.
+    oe = ni + dep + capex - delta_wc
+
+    # --- Per share and yield ---
+    # market_cap is in INR Cr; price is in INR.
+    # shares (in units) = (mktcap * 1e7) / price
+    shares       = (mktcap * 1e7) / price
+    oe_per_share = oe * 1e7 / shares        # convert Cr back to INR per share
+    oe_yield     = (oe_per_share / price) * 100  # as percent
+
+    result["owner_earnings_cr"]        = round(oe, 2)
+    result["owner_earnings_per_share"] = round(oe_per_share, 2)
+    result["owner_earnings_yield_pct"] = round(oe_yield, 2)
+    return result
+
+
+def _compute_debt_service_coverage(data: dict) -> dict:
+    """
+    Compute Debt Service Coverage Ratio (DSCR) from scraper data.
+
+    DSCR = Operating Cash Flow / Interest Expense
+    DSCR >= 2.0 = comfortable; DSCR < 1.0 = distress (can't cover interest from ops).
+
+    Args:
+        data: Full scraper output dict.
+
+    Returns:
+        dict with keys: dscr (float|None), dscr_verdict (str|None),
+        dscr_reason (str|None).
+    """
+    result = {"dscr": None, "dscr_verdict": None, "dscr_reason": None}
+
+    cf = data.get("cash_flow", {})
+    pl = data.get("pl_table", {})
+
+    ocf      = _safe(cf.get("operating"), 0)
+    interest = _safe(pl.get("interest"), 0)
+
+    if ocf is None:
+        result["dscr_reason"] = "operating cash flow unavailable"
+        return result
+    if interest is None:
+        result["dscr_reason"] = "interest expense unavailable"
+        return result
+    if interest <= 0:
+        # Zero or negative interest means debt-free or negligible debt — great signal.
+        result["dscr"]        = None
+        result["dscr_verdict"] = "debt_free_or_negligible"
+        result["dscr_reason"]  = f"interest expense = {interest} (near zero — debt is minimal)"
+        return result
+
+    dscr = ocf / interest
+    result["dscr"] = round(dscr, 2)
+
+    if dscr >= 3.0:
+        result["dscr_verdict"] = "comfortable"
+    elif dscr >= 1.5:
+        result["dscr_verdict"] = "adequate"
+    elif dscr >= 1.0:
+        result["dscr_verdict"] = "tight"
+    else:
+        result["dscr_verdict"] = "distress"
+
+    return result
+
+
+def _compute_roce_wacc_spread(capital_eff_dict: dict) -> dict:
+    """
+    Compute the spread between ROCE and the WACC proxy.
+
+    A positive spread means the business is creating value above its cost of
+    capital — the hallmark of a quality compounder. A negative spread means
+    the business is destroying value even as it grows.
+
+    Args:
+        capital_eff_dict: The capital_efficiency sub-dict already computed by
+                          _compute_capital_efficiency().
+
+    Returns:
+        dict with keys: roce_latest (float|None), wacc_proxy (float),
+        roce_wacc_spread (float|None), spread_verdict (str|None),
+        spread_reason (str|None).
+    """
+    result = {
+        "roce_latest":      None,
+        "wacc_proxy":       _WACC_PROXY,
+        "roce_wacc_spread": None,
+        "spread_verdict":   None,
+        "spread_reason":    None,
+    }
+
+    roce = capital_eff_dict.get("roce_latest")
+    if roce is None:
+        result["spread_reason"] = "ROCE data unavailable"
+        return result
+
+    spread = roce - _WACC_PROXY
+    result["roce_latest"]      = round(roce, 2)
+    result["roce_wacc_spread"] = round(spread, 2)
+
+    # Interpretation: > 5% spread = clear value creator, < 0% = value destroyer
+    if spread >= 5.0:
+        result["spread_verdict"] = "strong_value_creator"
+    elif spread >= 0.0:
+        result["spread_verdict"] = "marginal_value_creator"
+    else:
+        result["spread_verdict"] = "value_destroyer"
+
+    return result
+
+
+def _compute_52w_position(data: dict) -> dict:
+    """
+    Compute the stock's current price position within its 52-week range.
+
+    Position = (current_price - 52w_low) / (52w_high - 52w_low) × 100
+    0% = at 52-week low, 100% = at 52-week high.
+    Stocks above 50% are in the upper half of their range (positive momentum).
+
+    Args:
+        data: Full scraper output dict.
+
+    Returns:
+        dict with keys: position_pct (float|None), high_52w (float|None),
+        low_52w (float|None), current_price (float|None),
+        position_verdict (str|None), position_reason (str|None).
+    """
+    result = {
+        "position_pct":     None,
+        "high_52w":         None,
+        "low_52w":          None,
+        "current_price":    None,
+        "position_verdict": None,
+        "position_reason":  None,
+    }
+
+    hdr   = data.get("header", {})
+    hi    = hdr.get("high_52w")
+    lo    = hdr.get("low_52w")
+    price = hdr.get("current_price")
+
+    result["high_52w"]      = hi
+    result["low_52w"]       = lo
+    result["current_price"] = price
+
+    if hi is None or lo is None or price is None:
+        result["position_reason"] = "52w high/low or current price unavailable"
+        return result
+    if hi <= lo:
+        result["position_reason"] = f"52w high ({hi}) <= low ({lo}) — data anomaly"
+        return result
+
+    pos = (price - lo) / (hi - lo) * 100
+    result["position_pct"] = round(pos, 1)
+
+    # Interpretation: above 70% = near 52w high (strong momentum)
+    if pos >= 70.0:
+        result["position_verdict"] = "near_52w_high"
+    elif pos >= 50.0:
+        result["position_verdict"] = "upper_half"
+    elif pos >= 30.0:
+        result["position_verdict"] = "lower_half"
+    else:
+        result["position_verdict"] = "near_52w_low"
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -1343,7 +1657,8 @@ def compute_signals(data):
         data: dict -- full output of src/scraper.fetch_company_data()
 
     Returns:
-        dict with keys:
+        SignalsModel with attributes:
+            meta                 Company identity, price, is_bank flag
             piotroski            Piotroski F-Score (0-9) + 9 binary signals + label
             dupont               DuPont ROE decomposition + driver label
             earnings_quality     OCF/NP and FCF/NP ratios + quality flag
@@ -1353,9 +1668,15 @@ def compute_signals(data):
             valuation            Graham Number + PE + earnings yield + DCF fields
             promoter_risk        Pledged pct + flag
             quarterly_momentum   Revenue YoY + profit YoY + OPM trend
+            bank_signals         Bank/NBFC-specific signals (None if not a bank)
+            peg                  PEG ratio (PE / 3yr profit CAGR)
+            owner_earnings       Buffett owner earnings + per-share + yield
+            dscr                 Debt Service Coverage Ratio
+            roce_wacc            ROCE minus WACC proxy spread
+            price_momentum       52-week price range position
             fundamentals_score   int 1-10, mechanically derived
             valuation_score      int 1-10, mechanically derived
-            bank_signals         Bank/NBFC-specific signals (None if not a bank)
+            wc_source            Working capital data source flag
     """
     is_bank = data.get("is_bank", False)
 
@@ -1415,18 +1736,66 @@ def compute_signals(data):
         valuation.get("pe_current"),
     )
 
-    return {
-        "piotroski":            piotroski,
-        "dupont":               dupont,
-        "earnings_quality":     earnings_quality,
-        "growth_quality":       growth_quality,
-        "capital_efficiency":   capital_eff,
-        "balance_sheet_health": balance_sheet,
-        "valuation":            valuation,
-        "promoter_risk":        promoter_risk,
-        "quarterly_momentum":   quarterly_mom,
-        "fundamentals_score":   fundamentals_score,
-        "valuation_score":      valuation_score,
-        "bank_signals":         bank_signals,
-        "wc_source":            wc_source,
-    }
+    # --- Build MetaModel ---
+    header = data.get("header", {})
+
+    # Handle bank_signals: BankSignalsModel requires 4 non-None floats.
+    # If any required field is missing, treat as non-bank to avoid ValidationError.
+    bank_signals_model = None
+    effective_is_bank  = is_bank
+    if is_bank and bank_signals is not None:
+        bs_data = bank_signals
+        if all(bs_data.get(k) is not None for k in ("gross_npa_pct", "net_npa_pct", "car_pct", "nim_pct")):
+            bank_signals_model = BankSignalsModel(**bs_data)
+        else:
+            print(
+                f"Warning: bank required fields missing for "
+                f"'{header.get('name')}' — treating as non-bank"
+            )
+            effective_is_bank = False
+
+    meta = MetaModel(
+        name=header.get("name", "Unknown"),
+        sector=header.get("sector", "Unknown"),
+        current_price=header.get("current_price") or 1.0,
+        market_cap=header.get("market_cap") or 1.0,
+        is_bank=effective_is_bank,
+        high_52w=header.get("high_52w") or 1.0,
+        low_52w=header.get("low_52w") or 0.0,
+    )
+
+    # --- Compute the 5 agent pre-computation results ---
+    peg_result           = _compute_peg(data, valuation)
+    owner_earnings_result = _compute_owner_earnings(data)
+    dscr_result          = _compute_debt_service_coverage(data)
+    roce_wacc_result     = _compute_roce_wacc_spread(capital_eff)
+    price_momentum_result = _compute_52w_position(data)
+
+    # --- Construct ValuationModel: filter to only known ValuationModel fields ---
+    # valuation dict may have extra DCF keys after the .update(dcf) merge.
+    valuation_model = (
+        ValuationModel(**{k: v for k, v in valuation.items() if k in ValuationModel.model_fields})
+        if valuation else None
+    )
+
+    return SignalsModel(
+        meta=meta,
+        piotroski=PiotroskiModel(**piotroski) if piotroski else None,
+        dupont=DupontModel(**dupont) if dupont else None,
+        earnings_quality=EarningsQualityModel(**earnings_quality) if earnings_quality else None,
+        growth_quality=GrowthQualityModel(**growth_quality) if growth_quality else None,
+        capital_efficiency=CapitalEfficiencyModel(**capital_eff) if capital_eff else None,
+        balance_sheet_health=BalanceSheetHealthModel(**balance_sheet) if balance_sheet else None,
+        valuation=valuation_model,
+        promoter_risk=PromoterRiskModel(**promoter_risk) if promoter_risk else None,
+        quarterly_momentum=QuarterlyMomentumModel(**quarterly_mom) if quarterly_mom else None,
+        bank_signals=bank_signals_model,
+        peg=PegModel(**peg_result),
+        owner_earnings=OwnerEarningsModel(**owner_earnings_result),
+        dscr=DscrModel(**dscr_result),
+        roce_wacc=RoceWaccModel(**roce_wacc_result),
+        price_momentum=PriceMomentumModel(**price_momentum_result),
+        fundamentals_score=fundamentals_score,
+        valuation_score=valuation_score,
+        wc_source=wc_source,
+    )

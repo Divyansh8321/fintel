@@ -2,14 +2,14 @@
 # FILE: src/agents/quality.py
 # PURPOSE: Quality analyst agent — Munger/Pabrai investing lens.
 #          Evaluates a stock through ROCE vs WACC spread, durable
-#          competitive advantages, and earnings quality. Pre-computes
-#          ROCE-WACC spread in Python, then asks GPT-4o to interpret
-#          signals from this lens. Never re-computes signals.
-# INPUT:   data (dict) — scraper output
-#          signals (dict) — output of signals.py
+#          competitive advantages, and earnings quality. Reads pre-
+#          computed ROCE-WACC spread from signals.roce_wacc, then
+#          asks GPT-4o to interpret signals from this lens.
+#          Never re-computes signals.
+# INPUT:   signals (SignalsModel) — output of signals.py
 #          news (dict | None) — output of news.py
 # OUTPUT:  dict: lens, score, thesis, key_signals, risks, action
-# DEPENDS: src/llm.py
+# DEPENDS: src/llm.py, src/models.py
 # ============================================================
 
 # Philosophy: Charlie Munger's "wonderful company at a fair price" combined
@@ -21,70 +21,22 @@
 import json
 
 from src.llm import call_analysis_model
-
-# Proxy for Indian equity WACC — 10yr Gsec (7.2%) + equity risk premium (~4.8%).
-# Fixed at 12% consistent with DCF assumptions across the project.
-_WACC_PROXY = 12.0
+from src.models import SignalsModel
 
 
-def _compute_roce_wacc_spread(signals: dict) -> dict:
-    """
-    Compute the spread between ROCE and the WACC proxy.
-
-    A positive spread means the business is creating value above its cost of
-    capital — the hallmark of a quality compounder. A negative spread means
-    the business is destroying value even as it grows.
-
-    Args:
-        signals: Pre-computed signal dict from compute_signals().
-
-    Returns:
-        dict with keys: roce_latest (float|None), wacc_proxy (float),
-        roce_wacc_spread (float|None), spread_verdict (str|None),
-        spread_reason (str|None).
-    """
-    result = {
-        "roce_latest": None,
-        "wacc_proxy": _WACC_PROXY,
-        "roce_wacc_spread": None,
-        "spread_verdict": None,
-        "spread_reason": None,
-    }
-
-    roce = signals.get("capital_efficiency", {}).get("roce_latest")
-    if roce is None:
-        result["spread_reason"] = "ROCE data unavailable"
-        return result
-
-    spread = roce - _WACC_PROXY
-    result["roce_latest"] = round(roce, 2)
-    result["roce_wacc_spread"] = round(spread, 2)
-
-    # Interpretation: > 5% spread = clear value creator, < 0% = value destroyer
-    if spread >= 5.0:
-        result["spread_verdict"] = "strong_value_creator"
-    elif spread >= 0.0:
-        result["spread_verdict"] = "marginal_value_creator"
-    else:
-        result["spread_verdict"] = "value_destroyer"
-
-    return result
-
-
-def analyze(data: dict, signals: dict, news: dict | None) -> dict:
+def analyze(signals: SignalsModel, news: dict | None) -> dict:
     """
     Quality analyst agent — Munger/Pabrai investing lens.
 
-    Pre-computes ROCE vs WACC spread in Python, then sends a compact
-    payload of pre-computed quality signals to GPT-4o asking it to
+    Reads pre-computed ROCE vs WACC spread from signals.roce_wacc, then sends
+    a compact payload of pre-computed quality signals to GPT-4o asking it to
     evaluate the stock from a quality-at-fair-price perspective.
 
     All numerical signals have been computed by signals.py. This function
     does NOT ask GPT-4o to recompute or second-guess them.
 
     Args:
-        data:    Full scraper output from fetch_company_data().
-        signals: Pre-computed signal dict from compute_signals().
+        signals: Pre-computed SignalsModel from compute_signals().
         news:    News + sentiment dict from fetch_news(), or None.
 
     Returns:
@@ -99,58 +51,57 @@ def analyze(data: dict, signals: dict, news: dict | None) -> dict:
         On any failure, returns {"lens": "quality", "error": str(e)}.
     """
     try:
-        # --- Extract relevant sub-dicts from pre-computed signals ---
-        ce  = signals.get("capital_efficiency", {})
-        eq  = signals.get("earnings_quality", {})
-        dup = signals.get("dupont", {})
-        pit = signals.get("piotroski", {})
-        gq  = signals.get("growth_quality", {})
-        val = signals.get("valuation", {})
-
-        # --- Python pre-computation: ROCE vs WACC spread ---
-        spread = _compute_roce_wacc_spread(signals)
+        # --- Extract relevant sub-models from pre-computed signals ---
+        ce    = signals.capital_efficiency
+        eq    = signals.earnings_quality
+        dup   = signals.dupont
+        pit   = signals.piotroski
+        gq    = signals.growth_quality
+        val   = signals.valuation
+        pr    = signals.promoter_risk
+        spread = signals.roce_wacc
 
         # --- Build compact payload for GPT-4o ---
         payload = {
-            "company":      data.get("header", {}).get("name", "Unknown"),
-            "sector":       data.get("header", {}).get("sector", "Unknown"),
-            "company_type": "bank_or_nbfc" if data.get("is_bank") else "non_financial",
-            "current_price_inr": data.get("header", {}).get("current_price"),
+            "company":      signals.meta.name,
+            "sector":       signals.meta.sector,
+            "company_type": "bank_or_nbfc" if signals.meta.is_bank else "non_financial",
+            "current_price_inr": signals.meta.current_price,
             "capital_efficiency": {
-                "roce_latest_pct":  spread["roce_latest"],
-                "roce_trend":       ce.get("roce_trend"),
-                "roce_3yr_avg_pct": ce.get("roce_3yr_avg"),
-                "wacc_proxy_pct":   spread["wacc_proxy"],
-                "roce_wacc_spread":  spread["roce_wacc_spread"],
-                "spread_verdict":   spread["spread_verdict"],
-                "interest_coverage": ce.get("interest_coverage"),
-                "wc_trend":         ce.get("wc_trend"),
+                "roce_latest_pct":  spread.roce_latest if spread else None,
+                "roce_trend":       ce.roce_trend if ce else None,
+                "roce_3yr_avg_pct": ce.roce_3yr_avg if ce else None,
+                "wacc_proxy_pct":   spread.wacc_proxy if spread else None,
+                "roce_wacc_spread":  spread.roce_wacc_spread if spread else None,
+                "spread_verdict":   spread.spread_verdict if spread else None,
+                "interest_coverage": ce.interest_coverage if ce else None,
+                "wc_trend":         ce.working_capital_days_trend if ce else None,
             },
             "earnings_quality": {
-                "quality_flag":        eq.get("quality_flag"),
-                "ocf_to_net_profit":   eq.get("ocf_to_net_profit"),
-                "fcf_to_net_profit":   eq.get("fcf_to_net_profit"),
+                "quality_flag":        eq.quality_flag if eq else None,
+                "ocf_to_net_profit":   eq.ocf_to_net_profit if eq else None,
+                "fcf_to_net_profit":   eq.fcf_to_net_profit if eq else None,
             },
             "dupont": {
-                "net_margin_pct":    dup.get("net_margin"),
-                "roe_computed_pct":  dup.get("roe_computed"),
-                "roe_driver":        dup.get("roe_driver"),
-                "asset_turnover":    dup.get("asset_turnover"),
+                "net_margin_pct":    dup.net_margin if dup else None,
+                "roe_computed_pct":  dup.roe_computed if dup else None,
+                "roe_driver":        dup.roe_driver if dup else None,
+                "asset_turnover":    dup.asset_turnover if dup else None,
             },
             "piotroski": {
-                "score": pit.get("score"),
-                "label": pit.get("label"),
+                "score": pit.score if pit else None,
+                "label": pit.label if pit else None,
             },
             "growth_quality": {
-                "margin_trend":   gq.get("margin_trend"),
-                "acceleration":   gq.get("acceleration"),
+                "margin_trend":   gq.margin_trend if gq else None,
+                "acceleration":   gq.acceleration if gq else None,
             },
-            "pe_current":       val.get("pe_current"),
-            "industry_pe":      val.get("industry_pe"),
-            "ev_ebitda":        val.get("ev_ebitda"),
+            "pe_current":       val.pe_current if val else None,
+            "industry_pe":      val.industry_pe if val else None,
+            "ev_ebitda":        val.ev_ebitda if val else None,
             "promoter": {
-                "promoter_holding":        signals.get("promoter_risk", {}).get("promoter_holding"),
-                "promoter_holding_change": signals.get("promoter_risk", {}).get("promoter_holding_change"),
+                "promoter_holding":        pr.promoter_holding if pr else None,
+                "promoter_holding_change": pr.promoter_holding_change if pr else None,
             },
             "news_sentiment":   news.get("sentiment") if news else None,
         }
