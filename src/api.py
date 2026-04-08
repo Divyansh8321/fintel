@@ -27,7 +27,7 @@ import requests as req_lib
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from openai import OpenAIError
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from src.agents.contrarian import analyze as contrarian_analyze
 from src.agents.growth import analyze as growth_analyze
@@ -98,7 +98,7 @@ class WatchlistAddRequest(BaseModel):
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _run_agents_parallel(data: dict, signals: dict, news: dict | None) -> list[dict]:
+def _run_agents_parallel(signals, news: dict | None) -> list[dict]:
     """
     Run all five analyst agents in parallel using a thread pool.
 
@@ -110,8 +110,7 @@ def _run_agents_parallel(data: dict, signals: dict, news: dict | None) -> list[d
     continues with however many agents succeeded.
 
     Args:
-        data:    Full scraper output from fetch_company_data().
-        signals: Pre-computed signal dict from compute_signals().
+        signals: SignalsModel instance from compute_signals().
         news:    News + sentiment dict from fetch_news(), or None.
 
     Returns:
@@ -133,7 +132,7 @@ def _run_agents_parallel(data: dict, signals: dict, news: dict | None) -> list[d
     # Run all 5 agents concurrently — each blocks on an OpenAI API call
     with ThreadPoolExecutor(max_workers=5) as pool:
         futures = {
-            pool.submit(fn, data, signals, news): lens
+            pool.submit(fn, signals, news): lens
             for lens, fn in agent_fns.items()
         }
         for future in as_completed(futures):
@@ -271,13 +270,16 @@ def analyze(body: AnalyzeRequest):
     scraped_at = datetime.now(timezone.utc).isoformat()
 
     # --- Step 2: Compute quantitative signals (pure Python, no network) ---
-    signals = compute_signals(company_data)  # NOTE: mutates company_data["balance_sheet"] WC rows in-place
+    # ValidationError here means scraper returned bad data (e.g. empty name) — surface as 422.
+    try:
+        signals = compute_signals(company_data)
+    except ValidationError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
     # --- Step 3: Fetch news (non-blocking — failure returns None) ---
     news = None
-    company_name = company_data.get("header", {}).get("name", ticker)
     try:
-        news = fetch_news(company_name, ticker)
+        news = fetch_news(signals.meta.name, ticker)
     except Exception as e:
         # News failure is non-fatal — analysis proceeds without it
         print(f"Warning: news fetch failed for '{ticker}': {e}")
@@ -285,7 +287,7 @@ def analyze(body: AnalyzeRequest):
     # --- Step 4: Run 5 analyst agents in parallel ---
     # Each agent makes 1 GPT-4o call. Parallel execution keeps total latency
     # close to a single call rather than 5× serial latency.
-    analyst_notes = _run_agents_parallel(company_data, signals, news)
+    analyst_notes = _run_agents_parallel(signals, news)
 
     # --- Step 5: Synthesise the 5 analyst notes into a consensus verdict ---
     # Retry once on failure; if both attempts fail, return partial result with synthesis=None
@@ -293,7 +295,7 @@ def analyze(body: AnalyzeRequest):
     synthesis = None
     for attempt in range(2):
         try:
-            synthesis = synthesise(analyst_notes, company_data, signals)
+            synthesis = synthesise(analyst_notes, signals)
             break
         except (RuntimeError, OpenAIError) as e:
             if attempt == 1:
@@ -317,7 +319,7 @@ def analyze(body: AnalyzeRequest):
         "scraped_at":     scraped_at,
         "cache_age_hours": 0.0,
         "data":           company_data,
-        "signals":        signals,
+        "signals":        signals.model_dump(),
         "news":           news,
         "analyst_notes":  analyst_notes,
         "synthesis":      synthesis,
