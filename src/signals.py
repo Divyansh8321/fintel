@@ -304,12 +304,19 @@ def _compute_piotroski(data):
     else:
         signals["current_ratio_improving"] = None
 
-    # F7: No share dilution (EPS/NP ratio rising means fewer shares outstanding)
+    # F7: No share dilution (EPS/NP ratio rising means fewer shares outstanding).
+    # eps/np ≈ 1/shares_outstanding — only meaningful when both years have the
+    # same profit sign. If NP flips sign (loss↔profit), the ratio comparison is
+    # mathematically meaningless, so we return None rather than a wrong signal.
     eps0 = _safe(pl.get("eps"), 0)
     eps1 = _safe(pl.get("eps"), 1)
     if (eps0 is not None and np0 is not None and np0 != 0 and
             eps1 is not None and np1 is not None and np1 != 0):
-        signals["no_dilution"] = 1 if (eps0 / np0) >= (eps1 / np1) else 0
+        if np0 * np1 <= 0:
+            # Sign flip between years — comparison is meaningless
+            signals["no_dilution"] = None
+        else:
+            signals["no_dilution"] = 1 if (eps0 / np0) >= (eps1 / np1) else 0
     else:
         signals["no_dilution"] = None
 
