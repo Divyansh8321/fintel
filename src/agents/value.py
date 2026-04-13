@@ -112,7 +112,7 @@ def analyze(signals: SignalsModel, news: dict | None) -> dict:
             "balance_sheet": {
                 "debt_to_equity": bsh.debt_to_equity_latest if bsh else None,
                 "debt_trend": bsh.debt_trend if bsh else None,
-                "interest_coverage": bsh.interest_coverage if bsh else None,
+                "ebit_interest_coverage": bsh.ebit_interest_coverage if bsh else None,
             },
             "piotroski": {
                 "score": pit.score if pit else None,

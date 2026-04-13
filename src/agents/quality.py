@@ -74,7 +74,7 @@ def analyze(signals: SignalsModel, news: dict | None) -> dict:
                 "wacc_proxy_pct":   spread.wacc_proxy if spread else None,
                 "roce_wacc_spread":  spread.roce_wacc_spread if spread else None,
                 "spread_verdict":   spread.spread_verdict if spread else None,
-                "interest_coverage": ce.interest_coverage if ce else None,
+                "ebit_interest_coverage": ce.ebit_interest_coverage if ce else None,
                 "wc_trend":         ce.working_capital_days_trend if ce else None,
             },
             "earnings_quality": {

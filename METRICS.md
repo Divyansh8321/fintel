@@ -212,7 +212,7 @@
 | 108 | ROCE Latest | Screener | ratios_table.roce[0] | % | 2 |
 | 109 | ROCE 3yr Average | Python | mean(roce_series[:3]) | % | 2 |
 | 110 | ROCE Trend | Python | Linear slope over 5 points → "improving" / "stable" / "declining" | text | 2 |
-| 111 | Interest Coverage | Python | operating_profit[0] / interest[0] (9999 if debt-free) | x | 2 |
+| 111 | EBIT Interest Coverage | Python | operating_profit[0] / interest[0] (9999 if debt-free; EBIT-based, distinct from OCF interest coverage in #138) | x | 2 |
 | 112 | Working Capital Days Trend | Python | Inverted WC days slope → "improving" / "stable" / "worsening" | text | 3 |
 
 ---

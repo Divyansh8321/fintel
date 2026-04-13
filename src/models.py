@@ -126,8 +126,8 @@ class CapitalEfficiencyModel(BaseModel):
     roce_3yr_avg: Optional[float] = None
     roce_3yr_avg_reason: Optional[str] = None
     roce_trend: Optional[str] = None
-    interest_coverage: Optional[float] = None
-    interest_coverage_reason: Optional[str] = None
+    ebit_interest_coverage: Optional[float] = None
+    ebit_interest_coverage_reason: Optional[str] = None
     working_capital_days_trend: Optional[str] = None
 
 
@@ -141,7 +141,7 @@ class BalanceSheetHealthModel(BaseModel):
     debt_to_equity_latest: Optional[float] = None
     debt_to_equity_latest_reason: Optional[str] = None
     debt_trend: Optional[str] = None
-    interest_coverage: Optional[float] = None
+    ebit_interest_coverage: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------

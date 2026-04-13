@@ -609,7 +609,7 @@ def _compute_capital_efficiency(data):
         data: full dict from fetch_company_data()
 
     Returns:
-        dict with roce_latest, roce_3yr_avg, roce_trend, interest_coverage, wc_trend
+        dict with roce_latest, roce_3yr_avg, roce_trend, ebit_interest_coverage, wc_trend
     """
     pl = data.get("pl_table", {})
     rt = data.get("ratios_table", {})
@@ -620,8 +620,8 @@ def _compute_capital_efficiency(data):
         "roce_3yr_avg":               None,
         "roce_3yr_avg_reason":        None,
         "roce_trend":                 None,
-        "interest_coverage":          None,
-        "interest_coverage_reason":   None,
+        "ebit_interest_coverage":          None,
+        "ebit_interest_coverage_reason":   None,
         "working_capital_days_trend": None,
     }
 
@@ -646,13 +646,13 @@ def _compute_capital_efficiency(data):
         int0 = _safe(pl.get("interest"), 0)
 
         if op0 is None:
-            result["interest_coverage_reason"] = "operating_profit unavailable"
+            result["ebit_interest_coverage_reason"] = "operating_profit unavailable"
         elif int0 is None:
-            result["interest_coverage_reason"] = "interest expense unavailable"
+            result["ebit_interest_coverage_reason"] = "interest expense unavailable"
         elif int0 == 0:
-            result["interest_coverage"] = 9999.0  # debt-free
+            result["ebit_interest_coverage"] = 9999.0  # debt-free
         else:
-            result["interest_coverage"] = round(op0 / int0, 2)
+            result["ebit_interest_coverage"] = round(op0 / int0, 2)
 
         # Working capital days: rising = "worsening" (inverted from _trend)
         wc = rt.get("working_capital_days", [])
@@ -674,20 +674,20 @@ def _compute_capital_efficiency(data):
 # Signal 6: Balance Sheet Health
 # ---------------------------------------------------------------------------
 
-def _compute_balance_sheet_health(data, interest_coverage):
+def _compute_balance_sheet_health(data, ebit_interest_coverage):
     """
     Assess debt trend and interest burden.
 
     Debt trend: borrowings[0] vs borrowings[2] (newest-first, 2 years ago).
     10% change threshold for "reducing" / "increasing".
-    Interest coverage: reused from capital_efficiency.
+    EBIT interest coverage: reused from capital_efficiency.
 
     Args:
-        data:               full dict from fetch_company_data()
-        interest_coverage:  pre-computed float from _compute_capital_efficiency()
+        data:                     full dict from fetch_company_data()
+        ebit_interest_coverage:   pre-computed float from _compute_capital_efficiency()
 
     Returns:
-        dict with debt_to_equity_latest, debt_trend, interest_coverage
+        dict with debt_to_equity_latest, debt_trend, ebit_interest_coverage
     """
     bs = data.get("balance_sheet", {})
     kr = data.get("key_ratios", {})
@@ -696,7 +696,7 @@ def _compute_balance_sheet_health(data, interest_coverage):
         "debt_to_equity_latest":        None,
         "debt_to_equity_latest_reason": None,
         "debt_trend":                   None,
-        "interest_coverage":            interest_coverage,
+        "ebit_interest_coverage":       ebit_interest_coverage,
     }
 
     try:
@@ -1724,7 +1724,7 @@ def compute_signals(data):
     growth_quality   = _compute_growth_quality(data)
     capital_eff      = _compute_capital_efficiency(data)
     balance_sheet    = _compute_balance_sheet_health(
-                           data, capital_eff.get("interest_coverage"))
+                           data, capital_eff.get("ebit_interest_coverage"))
     valuation        = _compute_valuation(data)
     dcf              = _compute_dcf(data)
     promoter_risk    = _compute_promoter_risk(data)
