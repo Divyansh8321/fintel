@@ -884,12 +884,13 @@ def _compute_dcf(data):
 
     # --- Step 2: Determine stage-1 growth rate ---
     # Prefer 3yr sales CAGR; fall back to 5yr, then 3yr profit CAGR.
-    # Note: growth_rates keys use "sales_cagr_*" and "profit_cagr_*" (not "revenue_*").
-    raw_growth = (
-        gr.get("sales_cagr_3yr")
-        or gr.get("sales_cagr_5yr")
-        or gr.get("profit_cagr_3yr")
-    )
+    # Use explicit None checks — Python's `or` treats 0.0 as falsy, which would
+    # silently skip a valid 0% growth rate and use the next fallback instead.
+    raw_growth = gr.get("sales_cagr_3yr")
+    if raw_growth is None:
+        raw_growth = gr.get("sales_cagr_5yr")
+    if raw_growth is None:
+        raw_growth = gr.get("profit_cagr_3yr")
 
     if raw_growth is not None:
         # CAGR values are stored as percentages (e.g., 15.2 means 15.2%)
