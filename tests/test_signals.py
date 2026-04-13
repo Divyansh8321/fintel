@@ -115,7 +115,7 @@ def test_owner_earnings_zero_mktcap():
 
 
 # ---------------------------------------------------------------------------
-# Debt Service Coverage Ratio
+# OCF Interest Coverage (previously mislabeled DSCR — see issue #14)
 # ---------------------------------------------------------------------------
 
 def _dscr_data(ocf=200.0, interest=50.0):
@@ -127,39 +127,39 @@ def _dscr_data(ocf=200.0, interest=50.0):
 
 def test_dscr_comfortable():
     result = _compute_debt_service_coverage(_dscr_data(ocf=300.0, interest=50.0))
-    assert result["dscr"] == pytest.approx(6.0, rel=1e-3)
-    assert result["dscr_verdict"] == "comfortable"
+    assert result["ocf_interest_coverage"] == pytest.approx(6.0, rel=1e-3)
+    assert result["ocf_interest_coverage_verdict"] == "comfortable"
 
 
 def test_dscr_adequate():
     result = _compute_debt_service_coverage(_dscr_data(ocf=90.0, interest=50.0))
-    assert result["dscr"] == pytest.approx(1.8, rel=1e-3)
-    assert result["dscr_verdict"] == "adequate"
+    assert result["ocf_interest_coverage"] == pytest.approx(1.8, rel=1e-3)
+    assert result["ocf_interest_coverage_verdict"] == "adequate"
 
 
 def test_dscr_tight():
     result = _compute_debt_service_coverage(_dscr_data(ocf=55.0, interest=50.0))
-    assert result["dscr"] == pytest.approx(1.1, rel=1e-3)
-    assert result["dscr_verdict"] == "tight"
+    assert result["ocf_interest_coverage"] == pytest.approx(1.1, rel=1e-3)
+    assert result["ocf_interest_coverage_verdict"] == "tight"
 
 
 def test_dscr_distress():
     result = _compute_debt_service_coverage(_dscr_data(ocf=30.0, interest=50.0))
-    assert result["dscr"] == pytest.approx(0.6, rel=1e-3)
-    assert result["dscr_verdict"] == "distress"
+    assert result["ocf_interest_coverage"] == pytest.approx(0.6, rel=1e-3)
+    assert result["ocf_interest_coverage_verdict"] == "distress"
 
 
 def test_dscr_zero_interest():
     result = _compute_debt_service_coverage(_dscr_data(ocf=200.0, interest=0.0))
-    assert result["dscr"] is None
-    assert result["dscr_verdict"] == "debt_free_or_negligible"
+    assert result["ocf_interest_coverage"] is None
+    assert result["ocf_interest_coverage_verdict"] == "debt_free_or_negligible"
 
 
 def test_dscr_missing_ocf():
     data = {"cash_flow": {}, "pl_table": {"interest": [50.0]}}
     result = _compute_debt_service_coverage(data)
-    assert result["dscr"] is None
-    assert result["dscr_reason"] is not None
+    assert result["ocf_interest_coverage"] is None
+    assert result["ocf_interest_coverage_reason"] is not None
 
 
 # ---------------------------------------------------------------------------

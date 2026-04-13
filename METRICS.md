@@ -281,8 +281,8 @@
 | 135 | Owner Earnings (Cr) | Python | net_income + depreciation + capex − ΔWC | INR Cr | 3 |
 | 136 | Owner Earnings per Share | Python | (owner_earnings_cr × 1e7) / shares_outstanding | INR/share | 3 |
 | 137 | Owner Earnings Yield % | Python | (OE_per_share / current_price) × 100 | % | 3 |
-| 138 | DSCR | Python | operating_cf[0] / interest_expense[0] | x | 2 |
-| 139 | DSCR Verdict | Python | ≥3.0 "comfortable" / ≥1.5 "adequate" / ≥1.0 "tight" / <1.0 "distress" | text | 2 |
+| 138 | OCF Interest Coverage | Python | operating_cf[0] / interest_expense[0] (OCF-based ICR; previously mislabeled DSCR — true DSCR needs principal repayments, unavailable from Screener. See issue #14) | x | 2 |
+| 139 | OCF Interest Coverage Verdict | Python | ≥3.0 "comfortable" / ≥1.5 "adequate" / ≥1.0 "tight" / <1.0 "distress" | text | 2 |
 | 140 | WACC Proxy | Python | Fixed 12.0% (10yr Gsec 7.2% + equity risk premium 4.8%) | % | 1 |
 | 141 | ROCE-WACC Spread | Python | roce_latest − wacc_proxy | % | 2 |
 | 142 | Spread Verdict | Python | ≥5% "strong_value_creator" / ≥0% "marginal_value_creator" / <0% "value_destroyer" | text | 2 |

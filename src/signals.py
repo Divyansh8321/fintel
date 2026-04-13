@@ -1489,17 +1489,26 @@ def _compute_debt_service_coverage(data: dict) -> dict:
     """
     Compute Debt Service Coverage Ratio (DSCR) from scraper data.
 
-    DSCR = Operating Cash Flow / Interest Expense
-    DSCR >= 2.0 = comfortable; DSCR < 1.0 = distress (can't cover interest from ops).
+    OCF Interest Coverage = Operating Cash Flow / Interest Expense.
+    >= 3.0 = comfortable; < 1.0 = distress (can't cover interest from ops).
+
+    Note: previously labeled DSCR, but true DSCR includes principal repayments
+    which Screener does not expose. This is an OCF-based interest coverage ratio.
+    See issue #14.
 
     Args:
         data: Full scraper output dict.
 
     Returns:
-        dict with keys: dscr (float|None), dscr_verdict (str|None),
-        dscr_reason (str|None).
+        dict with keys: ocf_interest_coverage (float|None),
+        ocf_interest_coverage_verdict (str|None),
+        ocf_interest_coverage_reason (str|None).
     """
-    result = {"dscr": None, "dscr_verdict": None, "dscr_reason": None}
+    result = {
+        "ocf_interest_coverage":         None,
+        "ocf_interest_coverage_verdict": None,
+        "ocf_interest_coverage_reason":  None,
+    }
 
     cf = data.get("cash_flow", {})
     pl = data.get("pl_table", {})
@@ -1508,29 +1517,29 @@ def _compute_debt_service_coverage(data: dict) -> dict:
     interest = _safe(pl.get("interest"), 0)
 
     if ocf is None:
-        result["dscr_reason"] = "operating cash flow unavailable"
+        result["ocf_interest_coverage_reason"] = "operating cash flow unavailable"
         return result
     if interest is None:
-        result["dscr_reason"] = "interest expense unavailable"
+        result["ocf_interest_coverage_reason"] = "interest expense unavailable"
         return result
     if interest <= 0:
         # Zero or negative interest means debt-free or negligible debt — great signal.
-        result["dscr"]        = None
-        result["dscr_verdict"] = "debt_free_or_negligible"
-        result["dscr_reason"]  = f"interest expense = {interest} (near zero — debt is minimal)"
+        result["ocf_interest_coverage"]         = None
+        result["ocf_interest_coverage_verdict"] = "debt_free_or_negligible"
+        result["ocf_interest_coverage_reason"]  = f"interest expense = {interest} (near zero — debt is minimal)"
         return result
 
-    dscr = ocf / interest
-    result["dscr"] = round(dscr, 2)
+    ratio = ocf / interest
+    result["ocf_interest_coverage"] = round(ratio, 2)
 
-    if dscr >= 3.0:
-        result["dscr_verdict"] = "comfortable"
-    elif dscr >= 1.5:
-        result["dscr_verdict"] = "adequate"
-    elif dscr >= 1.0:
-        result["dscr_verdict"] = "tight"
+    if ratio >= 3.0:
+        result["ocf_interest_coverage_verdict"] = "comfortable"
+    elif ratio >= 1.5:
+        result["ocf_interest_coverage_verdict"] = "adequate"
+    elif ratio >= 1.0:
+        result["ocf_interest_coverage_verdict"] = "tight"
     else:
-        result["dscr_verdict"] = "distress"
+        result["ocf_interest_coverage_verdict"] = "distress"
 
     return result
 
@@ -1673,7 +1682,7 @@ def compute_signals(data):
             bank_signals         Bank/NBFC-specific signals (None if not a bank)
             peg                  PEG ratio (PE / 3yr profit CAGR)
             owner_earnings       Buffett owner earnings + per-share + yield
-            dscr                 Debt Service Coverage Ratio
+            dscr                 OCF-based interest coverage (OCF / interest expense)
             roce_wacc            ROCE minus WACC proxy spread
             price_momentum       52-week price range position
             fundamentals_score   int 1-10, mechanically derived

@@ -3,7 +3,7 @@
 # PURPOSE: Contrarian analyst agent — Burry/Druckenmiller lens.
 #          Surfaces risks others ignore: pledging, debt stress,
 #          earnings quality gaps, and cash flow deterioration.
-#          Reads pre-computed debt service coverage from signals.dscr,
+#          Reads pre-computed OCF interest coverage from signals.dscr,
 #          then asks GPT-4o to assess downside risk from this lens.
 #          Never re-computes signals.
 # INPUT:   signals (SignalsModel) — output of signals.py
@@ -29,7 +29,7 @@ def analyze(signals: SignalsModel, news: dict | None) -> dict:
     """
     Contrarian analyst agent — Burry/Druckenmiller investing lens.
 
-    Reads pre-computed debt service coverage from signals.dscr, then sends a
+    Reads pre-computed OCF interest coverage from signals.dscr, then sends a
     compact payload focused on downside risks to GPT-4o asking it to evaluate
     the stock from an adversarial, risk-first perspective.
 
@@ -84,10 +84,10 @@ def analyze(signals: SignalsModel, news: dict | None) -> dict:
                 "debt_trend":        bsh.debt_trend if bsh else None,
                 "interest_coverage": bsh.interest_coverage if bsh else None,
             },
-            "debt_service_coverage": {
-                "dscr":         dscr.dscr if dscr else None,
-                "dscr_verdict": dscr.dscr_verdict if dscr else None,
-                "dscr_reason":  dscr.dscr_reason if dscr else None,
+            "ocf_interest_coverage": {
+                "ocf_interest_coverage":         dscr.ocf_interest_coverage if dscr else None,
+                "ocf_interest_coverage_verdict": dscr.ocf_interest_coverage_verdict if dscr else None,
+                "ocf_interest_coverage_reason":  dscr.ocf_interest_coverage_reason if dscr else None,
             },
             "earnings_quality": {
                 "quality_flag":      eq.quality_flag if eq else None,

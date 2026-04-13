@@ -245,11 +245,13 @@ class OwnerEarningsModel(BaseModel):
 
 
 class DscrModel(BaseModel):
-    """Debt Service Coverage Ratio = OCF / interest expense."""
+    """OCF-based interest coverage = operating cash flow / interest expense.
+    (Previously mislabeled DSCR — true DSCR would include principal repayments,
+    which Screener does not expose. See issue #14.)"""
 
-    dscr: Optional[float] = None
-    dscr_verdict: Optional[str] = None
-    dscr_reason: Optional[str] = None
+    ocf_interest_coverage: Optional[float] = None
+    ocf_interest_coverage_verdict: Optional[str] = None
+    ocf_interest_coverage_reason: Optional[str] = None
 
 
 class RoceWaccModel(BaseModel):

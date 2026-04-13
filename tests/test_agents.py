@@ -65,7 +65,7 @@ def minimal_signals() -> SignalsModel:
         quarterly_momentum=QuarterlyMomentumModel(revenue_yoy_pct=14.0, profit_yoy_pct=18.0, opm_trend="improving"),
         peg=PegModel(peg_ratio=1.5, peg_verdict="fair"),
         owner_earnings=OwnerEarningsModel(owner_earnings_cr=500.0, owner_earnings_per_share=10.0, owner_earnings_yield_pct=1.0),
-        dscr=DscrModel(dscr=4.0, dscr_verdict="comfortable"),
+        dscr=DscrModel(ocf_interest_coverage=4.0, ocf_interest_coverage_verdict="comfortable"),
         roce_wacc=RoceWaccModel(roce_latest=18.0, wacc_proxy=12.0, roce_wacc_spread=6.0, spread_verdict="strong_value_creator"),
         price_momentum=PriceMomentumModel(position_pct=75.0, position_verdict="near_52w_high", current_price=1000.0, high_52w=1200.0, low_52w=800.0),
     )
