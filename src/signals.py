@@ -288,27 +288,21 @@ def _compute_piotroski(data):
     else:
         signals["leverage_decreasing"] = None
 
-    # F6: Current ratio improving YoY.
-    # Current ratio = other_assets / other_liabilities (both now available as
-    # time series from the balance sheet schedule API). Falls back to the single
-    # key_ratios.current_ratio > 1.0 threshold if schedule data is absent.
-    oa0 = _safe(bs.get("other_assets"), 0)
-    oa1 = _safe(bs.get("other_assets"), 1)
-    ol0 = _safe(bs.get("other_liabilities"), 0)
-    ol1 = _safe(bs.get("other_liabilities"), 1)
-
-    if (oa0 is not None and ol0 is not None and ol0 > 0 and
-            oa1 is not None and ol1 is not None and ol1 > 0):
-        cr0 = oa0 / ol0
-        cr1 = oa1 / ol1
-        signals["current_ratio_improving"] = 1 if cr0 > cr1 else 0
+    # F6: Current ratio > 1.0 (single-point threshold).
+    # Screener does not expose current ratio as an annual series — only the
+    # latest value is available via key_ratios.current_ratio (from
+    # section#ratios or quick_ratios API). YoY comparison is therefore not
+    # possible. We use the single-point threshold (CR > 1.0 = pass) which
+    # is a widely accepted fallback in Piotroski implementations when
+    # historical current ratio data is unavailable.
+    # Note: other_assets / other_liabilities was previously used here as a
+    # YoY proxy, but those are residual balance sheet buckets, NOT current
+    # assets / current liabilities — see issue #13.
+    cr = kr.get("current_ratio")
+    if cr is not None:
+        signals["current_ratio_improving"] = 1 if cr > 1.0 else 0
     else:
-        # Fallback: single point from key_ratios, use > 1.0 threshold
-        cr = kr.get("current_ratio")
-        if cr is not None:
-            signals["current_ratio_improving"] = 1 if cr > 1.0 else 0
-        else:
-            signals["current_ratio_improving"] = None
+        signals["current_ratio_improving"] = None
 
     # F7: No share dilution (EPS/NP ratio rising means fewer shares outstanding)
     eps0 = _safe(pl.get("eps"), 0)
