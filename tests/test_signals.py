@@ -15,6 +15,10 @@ from src.signals import (
     _compute_debt_service_coverage,
     _compute_roce_wacc_spread,
     _compute_52w_position,
+    _compute_piotroski,
+    _compute_dupont,
+    _compute_earnings_quality,
+    _annual_offset,
 )
 
 
@@ -231,3 +235,119 @@ def test_52w_high_equals_low_anomaly():
     result = _compute_52w_position(_52w_data(price=100.0, high=100.0, low=100.0))
     assert result["position_pct"] is None
     assert result["position_reason"] is not None
+
+
+# ---------------------------------------------------------------------------
+# TTM offset — _annual_offset and affected signal functions
+# ---------------------------------------------------------------------------
+
+def _ttm_data(ttm_np=200.0, annual_np=100.0, annual_np_prior=80.0):
+    """
+    Minimal scraper dict where pl_table.years[0] == 'TTM'.
+    TTM net_profit=200 (inflated), annual=100, prior=80.
+
+    OPM after offset: [19.0, 20.0] → annual[0]=19.0 < annual[1]=20.0 → F8=0 (declining).
+    If TTM were used without offset: [20.0, 19.0] → F8=1 (improving). This is the
+    observable difference used to verify the offset is applied.
+
+    FCF = OCF + capex = 90 + (-20) = 70 → fcf_to_np = 70/100 = 0.7 → quality "high"
+    (ocf_to_np=0.9 >= 0.9 AND fcf_to_np=0.7 >= 0.7).
+    If TTM used: np=200 → ocf_to_np=0.45 → "medium" (wrong).
+    """
+    return {
+        "pl_table": {
+            "years":            ["TTM", "Mar 2025", "Mar 2024"],
+            "net_profit":       [ttm_np, annual_np, annual_np_prior],
+            "sales":            [2000.0, 1000.0, 900.0],
+            "operating_profit": [400.0, 200.0, 180.0],
+            "interest":         [20.0, 20.0, 18.0],
+            # TTM opm=20.0; annual[0]=19.0, annual[1]=20.0
+            # After offset: [19.0, 20.0] → F8 = 0 (declining)
+            # Without offset: [20.0, 19.0] → F8 = 1 (improving) — would be wrong
+            "opm_pct":          [20.0, 19.0, 20.0],
+            "eps":              [40.0, 20.0, 16.0],
+            "depreciation":     [50.0, 25.0, 22.0],
+        },
+        "balance_sheet": {
+            "years":        ["Mar 2025", "Mar 2024", "Mar 2023"],
+            "total_assets": [1000.0, 900.0, 800.0],
+            "borrowings":   [200.0, 220.0, 240.0],
+            "equity_capital": [50.0, 50.0, 50.0],
+            "reserves":       [450.0, 400.0, 350.0],
+            "long_term_borrowings":  [150.0, 170.0, 190.0],
+            "short_term_borrowings": [50.0, 50.0, 50.0],
+            "lease_liabilities":     [0.0, 0.0, 0.0],
+        },
+        "cash_flow": {
+            "operating": [90.0, 80.0, 70.0],
+            "investing":  [-20.0, -25.0, -20.0],
+            # capex=-20 → FCF = 90 + (-20) = 70 → fcf_to_np = 70/100 = 0.7 → "high"
+            "capex":      [-20.0, -25.0, -20.0],
+        },
+        "key_ratios": {"current_ratio": 1.5},
+        "header": {"current_price": 500.0, "market_cap": 5000.0},
+        "ratios_table": {"roce": [20.0, 18.0, 16.0], "working_capital_days": []},
+    }
+
+
+def test_annual_offset_detects_ttm():
+    """_annual_offset returns 1 when years[0] == 'TTM'."""
+    data = _ttm_data()
+    assert _annual_offset(data) == 1
+
+
+def test_annual_offset_no_ttm():
+    """_annual_offset returns 0 when no TTM present."""
+    data = _ttm_data()
+    data["pl_table"]["years"][0] = "Mar 2026"
+    assert _annual_offset(data) == 0
+
+
+def test_piotroski_uses_annual_not_ttm():
+    """
+    F8 (gross margin): after offset opm=[19.0, 20.0] → annual[0]=19.0 < annual[1]=20.0
+    → F8=0 (declining margin).
+    Without the offset opm=[20.0, 19.0] → F8=1 (improving) — which would be wrong.
+    This directly verifies the TTM entry is skipped.
+    """
+    data = _ttm_data()
+    result = _compute_piotroski(data)
+    assert result["score"] is not None
+    assert result["signals"]["gross_margin_improving"] == 0
+
+
+def test_dupont_uses_annual_not_ttm():
+    """
+    DuPont latest_year must be 'Mar 2025' (first annual), not 'TTM'.
+    Net margin must be computed on annual sales/np, not TTM values.
+    """
+    data = _ttm_data()
+    result = _compute_dupont(data)
+    assert result["latest_year"] == "Mar 2025"
+    # net_margin = (100 / 1000) * 100 = 10.0%
+    assert result["net_margin"] == pytest.approx(10.0, rel=1e-3)
+
+
+def test_earnings_quality_uses_annual_not_ttm():
+    """
+    OCF/NP ratio must use annual NP (100), not TTM NP (200).
+    ocf_to_net_profit = 90 / 100 = 0.9 (high quality).
+    If TTM used: 90 / 200 = 0.45 → medium quality (wrong).
+    """
+    data = _ttm_data()
+    result = _compute_earnings_quality(data)
+    assert result["ocf_to_net_profit"] == pytest.approx(0.9, rel=1e-3)
+    assert result["quality_flag"] == "high"
+
+
+def test_owner_earnings_uses_annual_not_ttm():
+    """
+    Owner earnings must use annual NP (100) and depreciation (25), not TTM values.
+    OE = 100 + 25 + (-20) = 105 Cr.
+    If TTM used: 200 + 50 + (-20) = 230 Cr (wrong).
+    """
+    from src.signals import _compute_owner_earnings
+    data = _ttm_data()
+    result = _compute_owner_earnings(data)
+    assert result["owner_earnings_cr"] == pytest.approx(105.0, rel=1e-3)
+    assert result["oe_reason"] is None

@@ -126,6 +126,30 @@ def _pct_change(new_val, old_val):
     return (new_val - old_val) / abs(old_val)
 
 
+def _annual_offset(data: dict) -> int:
+    """
+    Return the index offset to skip TTM when present in the P&L series.
+
+    Screener prepends a 'TTM' entry (rolling 12-month sum) to the P&L
+    series when the most recent full annual has not yet been published.
+    TTM must not be used as the base year for YoY comparisons because:
+      - It overlaps 3 quarters with the prior annual year (noisy deltas)
+      - Balance sheet index 0 is an interim period, not year-end aligned
+
+    Returns 1 if years[0] == 'TTM', else 0.
+
+    Args:
+        data: full dict from fetch_company_data()
+
+    Returns:
+        int — 0 (no TTM) or 1 (TTM present, skip to first annual)
+    """
+    years = data.get("pl_table", {}).get("years", [])
+    if years and str(years[0]).strip().upper() == "TTM":
+        return 1
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Working capital back-fill helper
 # ---------------------------------------------------------------------------
@@ -247,26 +271,37 @@ def _compute_piotroski(data):
     cf = data.get("cash_flow", {})
     kr = data.get("key_ratios", {})
 
+    # Skip TTM entry if present so index 0 = latest annual, index 1 = prior annual.
+    off = _annual_offset(data)
+    pl_np  = (pl.get("net_profit") or [])[off:]
+    pl_eps = (pl.get("eps") or [])[off:]
+    pl_opm = (pl.get("opm_pct") or [])[off:]
+    pl_s   = (pl.get("sales") or [])[off:]
+    bs_ta  = (bs.get("total_assets") or [])[off:]
+    bs_b   = (bs.get("borrowings") or [])[off:]
+    # Cash flow has no TTM — always use as-is (Screener only provides annual CF)
+    cf_op  = cf.get("operating") or []
+
     signals = {}
 
     # F1: ROA positive (net income / total assets > 0)
-    np0 = _safe(pl.get("net_profit"), 0)
-    ta0 = _safe(bs.get("total_assets"), 0)
+    np0 = _safe(pl_np, 0)
+    ta0 = _safe(bs_ta, 0)
     if np0 is not None and ta0 is not None and ta0 != 0:
         signals["roa_positive"] = 1 if (np0 / ta0) > 0 else 0
     else:
         signals["roa_positive"] = None
 
     # F2: Operating cash flow positive
-    ocf0 = _safe(cf.get("operating"), 0)
+    ocf0 = _safe(cf_op, 0)
     if ocf0 is not None:
         signals["ocf_positive"] = 1 if ocf0 > 0 else 0
     else:
         signals["ocf_positive"] = None
 
     # F3: ROA improving year-over-year
-    np1 = _safe(pl.get("net_profit"), 1)
-    ta1 = _safe(bs.get("total_assets"), 1)
+    np1 = _safe(pl_np, 1)
+    ta1 = _safe(bs_ta, 1)
     if (np0 is not None and ta0 is not None and ta0 != 0 and
             np1 is not None and ta1 is not None and ta1 != 0):
         signals["roa_improving"] = 1 if (np0 / ta0) > (np1 / ta1) else 0
@@ -280,8 +315,8 @@ def _compute_piotroski(data):
         signals["ocf_exceeds_net_income"] = None
 
     # F5: Long-term leverage ratio decreased (borrowings / total_assets)
-    b0 = _safe(bs.get("borrowings"), 0)
-    b1 = _safe(bs.get("borrowings"), 1)
+    b0 = _safe(bs_b, 0)
+    b1 = _safe(bs_b, 1)
     if (b0 is not None and ta0 is not None and ta0 != 0 and
             b1 is not None and ta1 is not None and ta1 != 0):
         signals["leverage_decreasing"] = 1 if (b0 / ta0) < (b1 / ta1) else 0
@@ -308,8 +343,8 @@ def _compute_piotroski(data):
     # eps/np ≈ 1/shares_outstanding — only meaningful when both years have the
     # same profit sign. If NP flips sign (loss↔profit), the ratio comparison is
     # mathematically meaningless, so we return None rather than a wrong signal.
-    eps0 = _safe(pl.get("eps"), 0)
-    eps1 = _safe(pl.get("eps"), 1)
+    eps0 = _safe(pl_eps, 0)
+    eps1 = _safe(pl_eps, 1)
     if (eps0 is not None and np0 is not None and np0 != 0 and
             eps1 is not None and np1 is not None and np1 != 0):
         if np0 * np1 <= 0:
@@ -321,16 +356,16 @@ def _compute_piotroski(data):
         signals["no_dilution"] = None
 
     # F8: Gross margin improved (proxy: OPM% -- no gross profit field available)
-    opm0 = _safe(pl.get("opm_pct"), 0)
-    opm1 = _safe(pl.get("opm_pct"), 1)
+    opm0 = _safe(pl_opm, 0)
+    opm1 = _safe(pl_opm, 1)
     if opm0 is not None and opm1 is not None:
         signals["gross_margin_improving"] = 1 if opm0 > opm1 else 0
     else:
         signals["gross_margin_improving"] = None
 
     # F9: Asset turnover improved (sales / total_assets)
-    s0 = _safe(pl.get("sales"), 0)
-    s1 = _safe(pl.get("sales"), 1)
+    s0 = _safe(pl_s, 0)
+    s1 = _safe(pl_s, 1)
     if (s0 is not None and ta0 is not None and ta0 != 0 and
             s1 is not None and ta1 is not None and ta1 != 0):
         signals["asset_turnover_improving"] = 1 if (s0 / ta0) > (s1 / ta1) else 0
@@ -386,8 +421,17 @@ def _compute_dupont(data):
     pl = data.get("pl_table", {})
     bs = data.get("balance_sheet", {})
 
+    # Skip TTM so index 0 = latest annual
+    off = _annual_offset(data)
+    pl_years = (pl.get("years") or [])[off:]
+    pl_np    = (pl.get("net_profit") or [])[off:]
+    pl_s     = (pl.get("sales") or [])[off:]
+    bs_ta    = (bs.get("total_assets") or [])[off:]
+    bs_eq    = (bs.get("equity_capital") or [])[off:]
+    bs_res   = (bs.get("reserves") or [])[off:]
+
     result = {
-        "latest_year":           _safe(pl.get("years"), 0),
+        "latest_year":           _safe(pl_years, 0),
         "net_margin":            None,
         "net_margin_reason":     None,
         "asset_turnover":        None,
@@ -399,11 +443,11 @@ def _compute_dupont(data):
     }
 
     try:
-        np0  = _safe(pl.get("net_profit"), 0)
-        s0   = _safe(pl.get("sales"), 0)
-        ta0  = _safe(bs.get("total_assets"), 0)
-        eq0  = _safe(bs.get("equity_capital"), 0)
-        res0 = _safe(bs.get("reserves"), 0)
+        np0  = _safe(pl_np, 0)
+        s0   = _safe(pl_s, 0)
+        ta0  = _safe(bs_ta, 0)
+        eq0  = _safe(bs_eq, 0)
+        res0 = _safe(bs_res, 0)
 
         if np0 is None or s0 is None or s0 == 0:
             result["net_margin_reason"] = "net_profit or sales unavailable"
@@ -479,6 +523,11 @@ def _compute_earnings_quality(data):
     pl = data.get("pl_table", {})
     cf = data.get("cash_flow", {})
 
+    # Skip TTM so net_profit index 0 = latest annual.
+    # Cash flow has no TTM — always annual.
+    off   = _annual_offset(data)
+    pl_np = (pl.get("net_profit") or [])[off:]
+
     result = {
         "ocf_to_net_profit":        None,
         "ocf_to_net_profit_reason": None,
@@ -488,7 +537,7 @@ def _compute_earnings_quality(data):
     }
 
     try:
-        np0  = _safe(pl.get("net_profit"), 0)
+        np0  = _safe(pl_np, 0)
         ocf0 = _safe(cf.get("operating"), 0)
         inv0 = _safe(cf.get("investing"), 0)
 
@@ -614,6 +663,12 @@ def _compute_capital_efficiency(data):
     pl = data.get("pl_table", {})
     rt = data.get("ratios_table", {})
 
+    # Skip TTM so index 0 = latest annual for P&L fields used in interest coverage.
+    # ratios_table (ROCE, WC days) has no TTM — always annual.
+    off    = _annual_offset(data)
+    pl_op  = (pl.get("operating_profit") or [])[off:]
+    pl_int = (pl.get("interest") or [])[off:]
+
     result = {
         "roce_latest":                None,
         "roce_latest_reason":         None,
@@ -642,8 +697,8 @@ def _compute_capital_efficiency(data):
 
         result["roce_trend"] = _trend(roce_series, 5)
 
-        op0  = _safe(pl.get("operating_profit"), 0)
-        int0 = _safe(pl.get("interest"), 0)
+        op0  = _safe(pl_op, 0)
+        int0 = _safe(pl_int, 0)
 
         if op0 is None:
             result["ebit_interest_coverage_reason"] = "operating_profit unavailable"
@@ -692,6 +747,17 @@ def _compute_balance_sheet_health(data, ebit_interest_coverage):
     bs = data.get("balance_sheet", {})
     kr = data.get("key_ratios", {})
 
+    # Skip TTM so index 0 = latest annual for all BS lookups.
+    # BS has no TTM itself, but P&L TTM offset should align BS reads too —
+    # use the same offset so Piotroski F5 and debt trend are period-consistent.
+    off    = _annual_offset(data)
+    bs_lt  = (bs.get("long_term_borrowings") or [])[off:]
+    bs_st  = (bs.get("short_term_borrowings") or [])[off:]
+    bs_lse = (bs.get("lease_liabilities") or [])[off:]
+    bs_eq  = (bs.get("equity_capital") or [])[off:]
+    bs_res = (bs.get("reserves") or [])[off:]
+    bs_b   = (bs.get("borrowings") or [])[off:]
+
     result = {
         "debt_to_equity_latest":        None,
         "debt_to_equity_latest_reason": None,
@@ -706,11 +772,11 @@ def _compute_balance_sheet_health(data, ebit_interest_coverage):
             # Compute from balance sheet matching Screener's definition:
             # Total Debt = long_term_borrowings + short_term_borrowings + lease_liabilities
             # Equity     = equity_capital + reserves
-            lt   = _safe(bs.get("long_term_borrowings"), 0) or 0
-            st   = _safe(bs.get("short_term_borrowings"), 0) or 0
-            lse  = _safe(bs.get("lease_liabilities"), 0) or 0
-            eq_cap   = _safe(bs.get("equity_capital"), 0)
-            reserves = _safe(bs.get("reserves"), 0)
+            lt   = _safe(bs_lt, 0) or 0
+            st   = _safe(bs_st, 0) or 0
+            lse  = _safe(bs_lse, 0) or 0
+            eq_cap   = _safe(bs_eq, 0)
+            reserves = _safe(bs_res, 0)
             if eq_cap is not None and reserves is not None:
                 total_debt   = lt + st + lse
                 total_equity = eq_cap + reserves
@@ -723,8 +789,8 @@ def _compute_balance_sheet_health(data, ebit_interest_coverage):
                 result["debt_to_equity_latest_reason"] = "equity data unavailable"
         result["debt_to_equity_latest"] = de
 
-        b0 = _safe(bs.get("borrowings"), 0)
-        b2 = _safe(bs.get("borrowings"), 2)
+        b0 = _safe(bs_b, 0)
+        b2 = _safe(bs_b, 2)
 
         if b0 is None or b2 is None:
             result["debt_trend"] = "stable"
@@ -1429,9 +1495,19 @@ def _compute_owner_earnings(data: dict) -> dict:
     bs  = data.get("balance_sheet", {})
     hdr = data.get("header", {})
 
+    # Skip TTM so index 0 = latest annual for P&L fields.
+    # Cash flow has no TTM. BS has no TTM but apply same offset
+    # so WC delta [0] vs [1] spans the same two annual periods as the P&L.
+    off    = _annual_offset(data)
+    pl_np  = (pl.get("net_profit") or [])[off:]
+    pl_dep = (pl.get("depreciation") or [])[off:]
+    bs_tr  = (bs.get("trade_receivables") or [])[off:]
+    bs_inv = (bs.get("inventories") or [])[off:]
+    bs_tp  = (bs.get("trade_payables") or [])[off:]
+
     # --- Gather components ---
-    ni    = _safe(pl.get("net_profit"), 0)
-    dep   = _safe(pl.get("depreciation"), 0)
+    ni    = _safe(pl_np, 0)
+    dep   = _safe(pl_dep, 0)
     capex = _safe(cf.get("capex"), 0)   # negative = outflow
     price  = hdr.get("current_price")
     mktcap = hdr.get("market_cap")      # INR Cr
@@ -1455,12 +1531,12 @@ def _compute_owner_earnings(data: dict) -> dict:
 
     # --- Compute ΔWorking Capital (optional — skip if data missing) ---
     # WC = Trade Receivables + Inventories - Trade Payables
-    tr0  = _safe(bs.get("trade_receivables"), 0)
-    tr1  = _safe(bs.get("trade_receivables"), 1)
-    inv0 = _safe(bs.get("inventories"), 0)
-    inv1 = _safe(bs.get("inventories"), 1)
-    tp0  = _safe(bs.get("trade_payables"), 0)
-    tp1  = _safe(bs.get("trade_payables"), 1)
+    tr0  = _safe(bs_tr, 0)
+    tr1  = _safe(bs_tr, 1)
+    inv0 = _safe(bs_inv, 0)
+    inv1 = _safe(bs_inv, 1)
+    tp0  = _safe(bs_tp, 0)
+    tp1  = _safe(bs_tp, 1)
 
     delta_wc = 0.0
     if all(v is not None for v in [tr0, tr1, inv0, inv1, tp0, tp1]):

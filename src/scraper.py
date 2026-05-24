@@ -966,7 +966,8 @@ def _get_balance_sheet_bank(
         return [None] * len(years)
 
     # Fetch borrowings schedule — banks still have market borrowings
-    borrowings_sched   = _fetch_schedule(company_id, "Borrowings",    "balance-sheet", is_consolidated)
+    # Screener uses "Borrowing" (singular) for banks, "Borrowings" (plural) for non-banks
+    borrowings_sched   = _fetch_schedule(company_id, "Borrowing",    "balance-sheet", is_consolidated)
     fixed_assets_sched = _fetch_schedule(company_id, "Fixed Assets",  "balance-sheet", is_consolidated)
 
     def _sched(sched_data: dict, label: str) -> list[float | None]:
@@ -979,7 +980,8 @@ def _get_balance_sheet_bank(
         "years":                    years,
         "equity_capital":           _row("Equity Capital"),
         "reserves":                 _row("Reserves"),
-        "borrowings":               _opt_row("Borrowings"),
+        # Screener uses "Borrowing" (singular) for banks — prefix match covers both
+        "borrowings":               _opt_row("Borrowing"),
         # Deposits = customer deposits (the bank's primary liability)
         "deposits":                 _opt_row("Deposits"),
         "other_liabilities":        _opt_row("Other Liabilities"),
@@ -1555,7 +1557,19 @@ def _get_shareholding(soup: BeautifulSoup, ticker: str) -> dict:
         raw = _require_row(rows, label, "shareholding", ticker)
         return [_parse_number_or_none(v) for v in raw[: len(quarters)]]
 
-    promoter_series = _pct("Promoters")
+    def _pct_optional(label: str) -> list[float | None]:
+        """Return full time-series for an optional shareholding row; None-filled if absent.
+
+        Used for Promoters row which is absent for professionally managed companies
+        (mutual funds, ETFs, index funds) that have no promoter group.
+        """
+        label_lower = label.lower()
+        for key, values in rows.items():
+            if key.lower().startswith(label_lower):
+                return [_parse_number_or_none(v) for v in values[: len(quarters)]]
+        return [None] * len(quarters)
+
+    promoter_series = _pct_optional("Promoters")
     fii_series      = _pct("FIIs")
     dii_series      = _pct("DIIs")
     public_series   = _pct("Public")

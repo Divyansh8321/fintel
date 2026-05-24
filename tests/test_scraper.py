@@ -57,6 +57,7 @@ def test_reliance_returns_all_top_level_keys(reliance):
     """
     expected_keys = {
         "is_consolidated",
+        "is_bank",
         "currency",
         "header",
         "header_units",
@@ -69,6 +70,7 @@ def test_reliance_returns_all_top_level_keys(reliance):
         "quarterly",
         "shareholding",
         "pros_cons",
+        "bank_ratios",
     }
     assert set(reliance.keys()) == expected_keys
 
@@ -177,3 +179,37 @@ def test_all_required_keys_present_regardless_of_consolidation(reliance):
     # Financial tables must have data
     assert len(reliance["pl_table"]["years"]) >= 10
     assert len(reliance["balance_sheet"]["years"]) >= 10
+
+
+def test_professionally_managed_company_no_crash():
+    """
+    Professionally managed companies (e.g. LT) have no promoter group.
+    Screener omits the Promoters row entirely in the shareholding table.
+    The scraper must not crash — promoter_pct should be 0.0 (not raise ValueError).
+    """
+    from src.scraper import fetch_company_data
+    data = fetch_company_data("LT")
+    sh = data["shareholding"]
+    assert "promoter_pct" in sh
+    # promoter_pct is 0.0 when row is absent (no promoter group)
+    assert sh["promoter_pct"] == 0.0
+    # Other shareholding fields must still be present and valid
+    for field in ["fii_pct", "dii_pct", "public_pct"]:
+        assert field in sh
+        assert 0.0 <= sh[field] <= 100.0
+
+
+def test_bank_balance_sheet_borrowings_populated():
+    """
+    Bank balance sheets use "Borrowing" (singular) as the row label, not "Borrowings".
+    The scraper must return a non-None borrowings series for bank tickers.
+
+    HDFCBANK: Screener shows Borrowings = Rs. 6,34,606 Cr (Mar 2025).
+    """
+    from src.scraper import fetch_company_data
+    data = fetch_company_data("HDFCBANK")
+    bs = data["balance_sheet"]
+    assert bs.get("borrowings") is not None, "borrowings must not be None for bank"
+    # At least the most recent value should be a positive number
+    latest = next((v for v in bs["borrowings"] if v is not None), None)
+    assert latest is not None and latest > 0, f"Expected positive borrowings, got {latest}"
