@@ -489,8 +489,11 @@ def _compute_dupont(data):
             else:
                 result["roe_driver"] = "mixed"
 
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Warning: DuPont computation failed: {e}")
+        result["net_margin_reason"]     = f"DuPont computation failed: {e}"
+        result["asset_turnover_reason"] = f"DuPont computation failed: {e}"
+        result["leverage_reason"]       = f"DuPont computation failed: {e}"
 
     return result
 
@@ -574,8 +577,10 @@ def _compute_earnings_quality(data):
         else:
             result["quality_flag"] = "low"
 
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Warning: Earnings quality computation failed: {e}")
+        result["ocf_to_net_profit_reason"] = f"Earnings quality computation failed: {e}"
+        result["fcf_to_net_profit_reason"] = f"Earnings quality computation failed: {e}"
 
     return result
 
@@ -636,8 +641,10 @@ def _compute_growth_quality(data):
             elif diff < -2.0:
                 result["acceleration"] = "decelerating"
 
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Warning: Growth quality computation failed: {e}")
+        result["margin_trend"] = f"Growth quality computation failed: {e}"
+        result["acceleration"] = f"Growth quality computation failed: {e}"
 
     return result
 
@@ -719,8 +726,11 @@ def _compute_capital_efficiency(data):
                 "stable":    "stable",
             }.get(raw, "stable")
 
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Warning: Capital efficiency computation failed: {e}")
+        result["roce_latest_reason"]           = f"Capital efficiency computation failed: {e}"
+        result["roce_3yr_avg_reason"]          = f"Capital efficiency computation failed: {e}"
+        result["ebit_interest_coverage_reason"] = f"Capital efficiency computation failed: {e}"
 
     return result
 
@@ -805,8 +815,9 @@ def _compute_balance_sheet_health(data, ebit_interest_coverage):
             else:
                 result["debt_trend"] = "stable"
 
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Warning: Balance sheet health computation failed: {e}")
+        result["debt_to_equity_latest_reason"] = f"Balance sheet health computation failed: {e}"
 
     return result
 
@@ -1117,8 +1128,9 @@ def _compute_valuation(data):
         if eps0 is not None and price is not None and price > 0:
             result["earnings_yield"] = round((eps0 / price) * 100, 2)
 
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Warning: Valuation computation failed: {e}")
+        result["graham_number_reason"] = f"Valuation computation failed: {e}"
 
     return result
 
@@ -1262,8 +1274,10 @@ def _compute_quarterly_momentum(data):
                 elif chg < -0.05:
                     result["opm_trend"] = "contracting"
 
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Warning: Quarterly momentum computation failed: {e}")
+        result["revenue_yoy_pct_reason"] = f"Quarterly momentum computation failed: {e}"
+        result["profit_yoy_pct_reason"]  = f"Quarterly momentum computation failed: {e}"
 
     return result
 
