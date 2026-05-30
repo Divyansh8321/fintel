@@ -330,14 +330,20 @@ def analyze(request: Request, body: AnalyzeRequest):
     # --- Step 5: Synthesise the 5 analyst notes into a consensus verdict ---
     # Retry once on failure; if both attempts fail, return partial result with synthesis=None
     # rather than raising 502 — all agent work is preserved in the response.
+    from openai import RateLimitError, APITimeoutError, InternalServerError as OpenAIServerError
     synthesis = None
     for attempt in range(2):
         try:
             synthesis = synthesise(analyst_notes, signals)
             break
-        except (RuntimeError, OpenAIError) as e:
+        except (RateLimitError, APITimeoutError, OpenAIServerError) as e:
+            # Transient errors — worth retrying once
             if attempt == 1:
                 print(f"Warning: synthesis failed after 2 attempts for '{ticker}': {e}")
+        except Exception as e:
+            # Permanent error (bad key, invalid model, etc.) — fail immediately
+            print(f"Warning: synthesis failed with non-retryable error for '{ticker}': {e}")
+            break
 
     # --- Step 6: Fetch BSE filings (non-blocking — failure captured in error field) ---
     # bse_code comes from the scraper header (extracted from the Screener company page).

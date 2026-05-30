@@ -77,6 +77,14 @@ def init_memory_tables() -> None:
             )
             """
         )
+        # Index for fast per-ticker history lookups — queries filter by ticker
+        # and sort by run_at DESC on every page load, so this index is hit every time.
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_history_ticker_run_at
+            ON analyst_history(ticker, run_at DESC)
+            """
+        )
         conn.commit()
 
 

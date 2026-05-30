@@ -215,7 +215,8 @@ def _summarise_pdf(pdf_url: str, title: str) -> str | None:
         with pdfplumber.open(pdf_bytes) as pdf:
             pages_text = [page.extract_text() or "" for page in pdf.pages]
         text = "\n".join(pages_text).strip()
-    except Exception:
+    except Exception as e:
+        print(f"Warning: PDF text extraction failed for '{title}': {e}")
         return None
 
     # Skip PDFs that are image-only scans or otherwise yield no usable text.
@@ -247,5 +248,6 @@ def _summarise_pdf(pdf_url: str, title: str) -> str | None:
             max_tokens=200,
             temperature=0.1,
         ).strip()
-    except Exception:
+    except Exception as e:
+        print(f"Warning: Filing summarisation LLM call failed for '{title}': {e}")
         return None

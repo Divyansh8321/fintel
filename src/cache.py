@@ -94,6 +94,7 @@ def get_cached(ticker: str) -> tuple[dict, str] | None:
     try:
         return json.loads(data_json), fetched_at_str
     except json.JSONDecodeError:
+        print(f"Warning: Corrupted cache entry for '{ticker}' — deleting and re-fetching.")
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute("DELETE FROM cache WHERE ticker = ?", (ticker,))
             conn.commit()

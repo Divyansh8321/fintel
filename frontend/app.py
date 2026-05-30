@@ -21,7 +21,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-API_URL = "http://localhost:8000/analyze"
+# Backend base URL — override via FINTEL_API_BASE in .env before deploying.
+_API_BASE = os.getenv("FINTEL_API_BASE", "http://localhost:8000")
+API_URL   = f"{_API_BASE}/analyze"
 
 # Passed as X-API-Key header on every backend call.
 # Matches FINTEL_API_KEY in .env — empty string when unset (auth off locally).
@@ -40,7 +42,7 @@ with st.sidebar:
 
     # Fetch current watchlist from API
     try:
-        wl_resp = requests.get("http://localhost:8000/watchlist", headers=_API_HEADERS, timeout=5)
+        wl_resp = requests.get(f"{_API_BASE}/watchlist", headers=_API_HEADERS, timeout=5)
         watchlist = wl_resp.json().get("watchlist", []) if wl_resp.status_code == 200 else []
     except requests.exceptions.ConnectionError:
         watchlist = []
@@ -55,7 +57,7 @@ with st.sidebar:
             if wl_col2.button("✕", key=f"rm_{item['ticker']}", help=f"Remove {item['ticker']}"):
                 try:
                     rm_resp = requests.delete(
-                        f"http://localhost:8000/watchlist/{item['ticker']}",
+                        f"{_API_BASE}/watchlist/{item['ticker']}",
                         headers=_API_HEADERS,
                         timeout=5,
                     )
@@ -79,7 +81,7 @@ with st.sidebar:
     if add_submitted and new_ticker:
         try:
             add_resp = requests.post(
-                "http://localhost:8000/watchlist",
+                f"{_API_BASE}/watchlist",
                 json={"ticker": new_ticker, "note": new_note},
                 headers=_API_HEADERS,
                 timeout=5,
@@ -105,7 +107,7 @@ clear_clicked   = btn_col2.button("Clear Cache", disabled=not ticker, use_contai
 
 if clear_clicked and ticker:
     try:
-        resp = requests.delete(f"http://localhost:8000/cache/{ticker}", headers=_API_HEADERS, timeout=10)
+        resp = requests.delete(f"{_API_BASE}/cache/{ticker}", headers=_API_HEADERS, timeout=10)
         if resp.status_code == 200:
             st.success(f"Cache cleared for **{ticker}**. Next Analyze will fetch live data.")
         elif resp.status_code == 404:
@@ -135,14 +137,18 @@ with st.spinner(f"Fetching data for **{ticker}** — scraping + signals + news +
         st.error(f"Error {resp.status_code}: {detail}")
         st.stop()
 
-# Hard-index required keys — KeyError surfaces immediately if API shape is wrong.
 source    = result.get("source", "live")
-data      = result["data"]
-signals   = result["signals"]
+data      = result.get("data")
+signals   = result.get("signals")
 news      = result.get("news")
 filings   = result.get("filings")
+
+if data is None or signals is None:
+    st.error("Unexpected API response — missing 'data' or 'signals'. Try clearing the cache and re-analysing.")
+    st.stop()
+
 # API returns analyst_notes as a list; convert to dict keyed by lens for easy lookup.
-agents    = {n["lens"]: n for n in result["analyst_notes"]}
+agents    = {n["lens"]: n for n in result.get("analyst_notes", [])}
 synthesis = result["synthesis"]   # consensus verdict dict
 
 header = data.get("header", {})
@@ -516,7 +522,7 @@ st.divider()
 st.subheader(f"Analysis History — {ticker}")
 
 try:
-    hist_resp = requests.get(f"http://localhost:8000/history/{ticker}", headers=_API_HEADERS, timeout=5)
+    hist_resp = requests.get(f"{_API_BASE}/history/{ticker}", headers=_API_HEADERS, timeout=5)
     history_runs = hist_resp.json().get("runs", []) if hist_resp.status_code == 200 else []
 except requests.exceptions.ConnectionError:
     history_runs = []
