@@ -122,10 +122,17 @@ def fetch_filings(bse_code: str, n: int = 5) -> dict:
         # Normalise date to "YYYY-MM-DD" regardless of the timestamp format returned.
         date = _parse_date(raw_date)
 
-        # Build the PDF URL only when an attachment filename is present.
+        # Build the PDF URL only when an attachment filename is present and safe.
+        # Reject filenames with path traversal characters or non-PDF extensions.
+        _safe_attachment = (
+            attachment_name
+            and attachment_name.lower().endswith(".pdf")
+            and "/" not in attachment_name
+            and ".." not in attachment_name
+        )
         pdf_url = (
             _PDF_BASE_URL.format(attachment_name=attachment_name)
-            if attachment_name
+            if _safe_attachment
             else None
         )
 

@@ -258,14 +258,14 @@ def analyze(body: AnalyzeRequest):
     try:
         company_data = fetch_company_data(ticker)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        print(f"Scraper validation error for '{ticker}': {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid ticker or data unavailable for '{ticker}'.")
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        print(f"Scraper runtime error for '{ticker}': {e}")
+        raise HTTPException(status_code=503, detail="Data fetch failed — check the ticker and try again.")
     except req_lib.exceptions.RequestException as e:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Network error while fetching data for '{ticker}': {e}",
-        )
+        print(f"Scraper network error for '{ticker}': {e}")
+        raise HTTPException(status_code=503, detail="Network error while fetching data — please try again.")
 
     scraped_at = datetime.now(timezone.utc).isoformat()
 

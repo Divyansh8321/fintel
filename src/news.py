@@ -61,7 +61,8 @@ def fetch_news(company_name: str, ticker: str) -> dict:
     if response.status_code != 200:
         body = response.json() if response.content else {}
         message = body.get("message", response.text)
-        raise RuntimeError(f"NewsAPI error {response.status_code}: {message}")
+        print(f"NewsAPI error {response.status_code}: {message}")
+        raise RuntimeError("News data unavailable — NewsAPI request failed.")
 
     data = response.json()
     raw_articles = data.get("articles", [])
