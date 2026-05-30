@@ -1215,6 +1215,17 @@ def _compute_quarterly_momentum(data):
     }
 
     try:
+        # Guard against scraper returning quarters newest-first.
+        # Quarter labels are strings like "Jun 2023", "Sep 2023" — lexicographic
+        # ordering is sufficient to detect a reversal since Screener returns them
+        # in chronological (oldest-first) order.
+        quarter_labels = q.get("quarters", [])
+        if len(quarter_labels) >= 2 and quarter_labels[-1] < quarter_labels[-2]:
+            raise ValueError(
+                "Quarterly data appears newest-first — expected oldest-first. "
+                "Screener.in ordering may have changed."
+            )
+
         sales  = q.get("sales", [])
         profit = q.get("net_profit", [])
         opm    = q.get("opm_pct", [])
@@ -1844,11 +1855,11 @@ def compute_signals(data):
     meta = MetaModel(
         name=header.get("name", "Unknown"),
         sector=header.get("sector", "Unknown"),
-        current_price=header.get("current_price") or 1.0,
-        market_cap=header.get("market_cap") or 1.0,
+        current_price=header.get("current_price") if header.get("current_price") is not None else 1.0,
+        market_cap=header.get("market_cap") if header.get("market_cap") is not None else 1.0,
         is_bank=effective_is_bank,
-        high_52w=header.get("high_52w") or 1.0,
-        low_52w=header.get("low_52w") or 0.0,
+        high_52w=header.get("high_52w") if header.get("high_52w") is not None else 1.0,
+        low_52w=header.get("low_52w") if header.get("low_52w") is not None else 0.0,
     )
 
     # --- Compute the 5 agent pre-computation results ---

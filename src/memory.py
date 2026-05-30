@@ -111,6 +111,18 @@ def save_analysis(ticker: str, result: dict) -> None:
     consensus = synthesis.get("consensus_score")
     verdict = synthesis.get("verdict")
 
+    # Clamp consensus to valid 1–10 range before persisting.
+    # LLMs occasionally drift outside this range; clamping prevents chart corruption.
+    if consensus is not None:
+        try:
+            clamped = max(1.0, min(10.0, float(consensus)))
+            if clamped != float(consensus):
+                print(f"Warning: consensus score {consensus} out of 1–10 range for '{ticker}' — clamped to {clamped}")
+            consensus = clamped
+        except (TypeError, ValueError):
+            print(f"Warning: consensus score {consensus!r} for '{ticker}' is not numeric — storing as None")
+            consensus = None
+
     # Agents dict — default to empty if pre-Phase 3
     agents = result.get("agents") or {}
 

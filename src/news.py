@@ -77,7 +77,7 @@ def fetch_news(company_name: str, ticker: str) -> dict:
     articles = [
         {
             "title": a.get("title", ""),
-            "source": a.get("source", {}).get("name", ""),
+            "source": (a.get("source") or {}).get("name", ""),
             "published_at": a.get("publishedAt", ""),
             "url": a.get("url", ""),
         }
