@@ -26,7 +26,8 @@ import os
 
 import requests as req_lib
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.security.api_key import APIKeyHeader
 from openai import OpenAIError
 from pydantic import BaseModel, ValidationError
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -62,6 +63,28 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 _RATE_LIMIT = os.getenv("ANALYZE_RATE_LIMIT", "20/minute")
 limiter = Limiter(key_func=get_remote_address, default_limits=[])
+
+# ---------------------------------------------------------------------------
+# Auth — static API key via X-API-Key header.
+# Set FINTEL_API_KEY in .env to enable. If unset, all requests pass through
+# (backwards-compatible for local dev).
+# ---------------------------------------------------------------------------
+_API_KEY = os.getenv("FINTEL_API_KEY") or None
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def _verify_key(key: str = Depends(_api_key_header)) -> None:
+    """
+    FastAPI dependency that enforces API key auth when FINTEL_API_KEY is set.
+
+    Args:
+        key: Value of the X-API-Key request header (None if absent).
+
+    Raises:
+        HTTPException 401 if FINTEL_API_KEY is set and the header is wrong/missing.
+    """
+    if _API_KEY and key != _API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +188,7 @@ def _run_agents_parallel(signals, news: dict | None) -> list[dict]:
 # Endpoints — cache management
 # ---------------------------------------------------------------------------
 
-@app.delete("/cache/{ticker}")
+@app.delete("/cache/{ticker}", dependencies=[Depends(_verify_key)])
 def clear_cache(ticker: str):
     """
     Deletes the cached entry for a ticker so the next /analyze call
@@ -213,7 +236,7 @@ def health():
 # Endpoints — analysis
 # ---------------------------------------------------------------------------
 
-@app.post("/analyze")
+@app.post("/analyze", dependencies=[Depends(_verify_key)])
 @limiter.limit(_RATE_LIMIT)
 def analyze(request: Request, body: AnalyzeRequest):
     """
@@ -360,7 +383,7 @@ def analyze(request: Request, body: AnalyzeRequest):
 # Endpoints — memory: history
 # ---------------------------------------------------------------------------
 
-@app.get("/history/{ticker}")
+@app.get("/history/{ticker}", dependencies=[Depends(_verify_key)])
 def history(ticker: str):
     """
     Returns all historical analysis runs for a ticker, newest first.
@@ -386,7 +409,7 @@ def history(ticker: str):
 # Endpoints — memory: watchlist
 # ---------------------------------------------------------------------------
 
-@app.get("/watchlist")
+@app.get("/watchlist", dependencies=[Depends(_verify_key)])
 def list_watchlist():
     """
     Returns all tickers currently in the watchlist, alphabetically.
@@ -397,7 +420,7 @@ def list_watchlist():
     return {"watchlist": get_watchlist()}
 
 
-@app.post("/watchlist")
+@app.post("/watchlist", dependencies=[Depends(_verify_key)])
 def add_watchlist(body: WatchlistAddRequest):
     """
     Adds a ticker to the watchlist (or updates its note if already present).
@@ -415,7 +438,7 @@ def add_watchlist(body: WatchlistAddRequest):
     return {"added": True, "ticker": ticker}
 
 
-@app.delete("/watchlist/{ticker}")
+@app.delete("/watchlist/{ticker}", dependencies=[Depends(_verify_key)])
 def delete_watchlist(ticker: str):
     """
     Removes a ticker from the watchlist.

@@ -13,10 +13,19 @@
 # DEPENDS: streamlit, requests, src/api.py running on :8000
 # ============================================================
 
+import os
+
 import requests
 import streamlit as st
+from dotenv import load_dotenv
+
+load_dotenv()
 
 API_URL = "http://localhost:8000/analyze"
+
+# Passed as X-API-Key header on every backend call.
+# Matches FINTEL_API_KEY in .env — empty string when unset (auth off locally).
+_API_HEADERS = {"X-API-Key": os.getenv("FINTEL_API_KEY", "")}
 
 st.set_page_config(page_title="Fintel", page_icon="📈", layout="wide")
 st.title("Fintel — AI Investment Research")
@@ -31,7 +40,7 @@ with st.sidebar:
 
     # Fetch current watchlist from API
     try:
-        wl_resp = requests.get("http://localhost:8000/watchlist", timeout=5)
+        wl_resp = requests.get("http://localhost:8000/watchlist", headers=_API_HEADERS, timeout=5)
         watchlist = wl_resp.json().get("watchlist", []) if wl_resp.status_code == 200 else []
     except requests.exceptions.ConnectionError:
         watchlist = []
@@ -46,7 +55,9 @@ with st.sidebar:
             if wl_col2.button("✕", key=f"rm_{item['ticker']}", help=f"Remove {item['ticker']}"):
                 try:
                     rm_resp = requests.delete(
-                        f"http://localhost:8000/watchlist/{item['ticker']}", timeout=5
+                        f"http://localhost:8000/watchlist/{item['ticker']}",
+                        headers=_API_HEADERS,
+                        timeout=5,
                     )
                     if rm_resp.status_code == 200:
                         st.rerun()
@@ -70,6 +81,7 @@ with st.sidebar:
             add_resp = requests.post(
                 "http://localhost:8000/watchlist",
                 json={"ticker": new_ticker, "note": new_note},
+                headers=_API_HEADERS,
                 timeout=5,
             )
             if add_resp.status_code == 200:
@@ -93,7 +105,7 @@ clear_clicked   = btn_col2.button("Clear Cache", disabled=not ticker, use_contai
 
 if clear_clicked and ticker:
     try:
-        resp = requests.delete(f"http://localhost:8000/cache/{ticker}", timeout=10)
+        resp = requests.delete(f"http://localhost:8000/cache/{ticker}", headers=_API_HEADERS, timeout=10)
         if resp.status_code == 200:
             st.success(f"Cache cleared for **{ticker}**. Next Analyze will fetch live data.")
         elif resp.status_code == 404:
@@ -112,7 +124,7 @@ if not analyze_clicked:
 
 with st.spinner(f"Fetching data for **{ticker}** — scraping + signals + news + 5 analysts + synthesis + filings…"):
     try:
-        resp = requests.post(API_URL, json={"ticker": ticker}, timeout=300)
+        resp = requests.post(API_URL, json={"ticker": ticker}, headers=_API_HEADERS, timeout=300)
         resp.raise_for_status()
         result = resp.json()
     except requests.exceptions.ConnectionError:
@@ -504,7 +516,7 @@ st.divider()
 st.subheader(f"Analysis History — {ticker}")
 
 try:
-    hist_resp = requests.get(f"http://localhost:8000/history/{ticker}", timeout=5)
+    hist_resp = requests.get(f"http://localhost:8000/history/{ticker}", headers=_API_HEADERS, timeout=5)
     history_runs = hist_resp.json().get("runs", []) if hist_resp.status_code == 200 else []
 except requests.exceptions.ConnectionError:
     history_runs = []
