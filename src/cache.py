@@ -9,8 +9,11 @@
 # ============================================================
 
 import json
+import logging
 import os
 import sqlite3
+
+logger = logging.getLogger(__name__)
 from datetime import datetime, timedelta, timezone
 
 # Absolute path anchored to this file's location — works regardless of
@@ -94,7 +97,7 @@ def get_cached(ticker: str) -> tuple[dict, str] | None:
     try:
         return json.loads(data_json), fetched_at_str
     except json.JSONDecodeError:
-        print(f"Warning: Corrupted cache entry for '{ticker}' — deleting and re-fetching.")
+        logger.warning("Corrupted cache entry for '%s' — deleting and re-fetching.", ticker)
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute("DELETE FROM cache WHERE ticker = ?", (ticker,))
             conn.commit()

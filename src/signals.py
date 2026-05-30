@@ -12,7 +12,10 @@
 # DEPENDS: math (stdlib only), src/models.py
 # ============================================================
 
+import logging
 import math
+
+logger = logging.getLogger(__name__)
 
 from src.models import (
     SignalsModel, MetaModel, PiotroskiModel, DupontModel,
@@ -490,7 +493,7 @@ def _compute_dupont(data):
                 result["roe_driver"] = "mixed"
 
     except Exception as e:
-        print(f"Warning: DuPont computation failed: {e}")
+        logger.warning("DuPont computation failed: %s", e)
         result["net_margin_reason"]     = f"DuPont computation failed: {e}"
         result["asset_turnover_reason"] = f"DuPont computation failed: {e}"
         result["leverage_reason"]       = f"DuPont computation failed: {e}"
@@ -578,7 +581,7 @@ def _compute_earnings_quality(data):
             result["quality_flag"] = "low"
 
     except Exception as e:
-        print(f"Warning: Earnings quality computation failed: {e}")
+        logger.warning("Earnings quality computation failed: %s", e)
         result["ocf_to_net_profit_reason"] = f"Earnings quality computation failed: {e}"
         result["fcf_to_net_profit_reason"] = f"Earnings quality computation failed: {e}"
 
@@ -642,7 +645,7 @@ def _compute_growth_quality(data):
                 result["acceleration"] = "decelerating"
 
     except Exception as e:
-        print(f"Warning: Growth quality computation failed: {e}")
+        logger.warning("Growth quality computation failed: %s", e)
         result["margin_trend"] = f"Growth quality computation failed: {e}"
         result["acceleration"] = f"Growth quality computation failed: {e}"
 
@@ -727,7 +730,7 @@ def _compute_capital_efficiency(data):
             }.get(raw, "stable")
 
     except Exception as e:
-        print(f"Warning: Capital efficiency computation failed: {e}")
+        logger.warning("Capital efficiency computation failed: %s", e)
         result["roce_latest_reason"]           = f"Capital efficiency computation failed: {e}"
         result["roce_3yr_avg_reason"]          = f"Capital efficiency computation failed: {e}"
         result["ebit_interest_coverage_reason"] = f"Capital efficiency computation failed: {e}"
@@ -816,7 +819,7 @@ def _compute_balance_sheet_health(data, ebit_interest_coverage):
                 result["debt_trend"] = "stable"
 
     except Exception as e:
-        print(f"Warning: Balance sheet health computation failed: {e}")
+        logger.warning("Balance sheet health computation failed: %s", e)
         result["debt_to_equity_latest_reason"] = f"Balance sheet health computation failed: {e}"
 
     return result
@@ -1129,7 +1132,7 @@ def _compute_valuation(data):
             result["earnings_yield"] = round((eps0 / price) * 100, 2)
 
     except Exception as e:
-        print(f"Warning: Valuation computation failed: {e}")
+        logger.warning("Valuation computation failed: %s", e)
         result["graham_number_reason"] = f"Valuation computation failed: {e}"
 
     return result
@@ -1275,7 +1278,7 @@ def _compute_quarterly_momentum(data):
                     result["opm_trend"] = "contracting"
 
     except Exception as e:
-        print(f"Warning: Quarterly momentum computation failed: {e}")
+        logger.warning("Quarterly momentum computation failed: %s", e)
         result["revenue_yoy_pct_reason"] = f"Quarterly momentum computation failed: {e}"
         result["profit_yoy_pct_reason"]  = f"Quarterly momentum computation failed: {e}"
 
@@ -1860,9 +1863,9 @@ def compute_signals(data):
         if all(bs_data.get(k) is not None for k in ("gross_npa_pct", "net_npa_pct", "car_pct", "nim_pct")):
             bank_signals_model = BankSignalsModel(**bs_data)
         else:
-            print(
-                f"Warning: bank required fields missing for "
-                f"'{header.get('name')}' — treating as non-bank"
+            logger.warning(
+                "Bank required fields missing for '%s' — treating as non-bank",
+                header.get("name"),
             )
             effective_is_bank = False
 

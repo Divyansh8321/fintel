@@ -9,8 +9,11 @@
 # ============================================================
 
 import io
+import logging
 
 import pdfplumber
+
+logger = logging.getLogger(__name__)
 import requests
 
 from src.cache import get_cached, set_cached
@@ -153,7 +156,7 @@ def fetch_filings(bse_code: str, n: int = 5) -> dict:
     try:
         set_cached(cache_key, result)
     except Exception as e:
-        print(f"Warning: cache write failed for filings_{bse_code}: {e}")
+        logger.warning("Cache write failed for filings_%s: %s", bse_code, e)
 
     return result
 
@@ -216,7 +219,7 @@ def _summarise_pdf(pdf_url: str, title: str) -> str | None:
             pages_text = [page.extract_text() or "" for page in pdf.pages]
         text = "\n".join(pages_text).strip()
     except Exception as e:
-        print(f"Warning: PDF text extraction failed for '{title}': {e}")
+        logger.warning("PDF text extraction failed for '%s': %s", title, e)
         return None
 
     # Skip PDFs that are image-only scans or otherwise yield no usable text.
@@ -249,5 +252,5 @@ def _summarise_pdf(pdf_url: str, title: str) -> str | None:
             temperature=0.1,
         ).strip()
     except Exception as e:
-        print(f"Warning: Filing summarisation LLM call failed for '{title}': {e}")
+        logger.warning("Filing summarisation LLM call failed for '%s': %s", title, e)
         return None

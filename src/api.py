@@ -17,12 +17,19 @@
 #          .env (OPENAI_API_KEY, SCREENER_EMAIL, SCREENER_PASSWORD, NEWS_API_KEY)
 # ============================================================
 
+import logging
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
 import os
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 import requests as req_lib
 from dotenv import load_dotenv
@@ -174,11 +181,10 @@ def _run_agents_parallel(signals, news: dict | None) -> list[dict]:
         }
         for future in as_completed(futures):
             lens = futures[future]
-            try:
-                notes[lens] = future.result()
-            except Exception as e:
-                # Should not reach here (agents catch internally), but be safe
-                notes[lens] = {"lens": lens, "error": str(e)}
+            # Agents handle their own LLM errors internally and return error dicts.
+            # Any exception here is a structural bug (import error, attribute error, etc.)
+            # and should surface as a real traceback — not be swallowed silently.
+            notes[lens] = future.result()
 
     # Return in a consistent order matching CLAUDE.md weights table
     return [notes[lens] for lens in ("value", "growth", "quality", "contrarian", "momentum")]
@@ -289,20 +295,20 @@ def analyze(request: Request, body: AnalyzeRequest):
         try:
             save_analysis(ticker, cached_data)
         except Exception as e:
-            print(f"Warning: memory write failed for '{ticker}': {e}")
+            logger.warning("Memory write failed for '%s': %s", ticker, e)
         return {"source": "cache", "scraped_at": fetched_at_str, "cache_age_hours": age_hours, **cached_data}
 
     # --- Step 1: Scrape Screener.in ---
     try:
         company_data = fetch_company_data(ticker)
     except ValueError as e:
-        print(f"Scraper validation error for '{ticker}': {e}")
+        logger.warning("Scraper validation error for '%s': %s", ticker, e)
         raise HTTPException(status_code=400, detail=f"Invalid ticker or data unavailable for '{ticker}'.")
     except RuntimeError as e:
-        print(f"Scraper runtime error for '{ticker}': {e}")
+        logger.warning("Scraper runtime error for '%s': %s", ticker, e)
         raise HTTPException(status_code=503, detail="Data fetch failed — check the ticker and try again.")
     except req_lib.exceptions.RequestException as e:
-        print(f"Scraper network error for '{ticker}': {e}")
+        logger.warning("Scraper network error for '%s': %s", ticker, e)
         raise HTTPException(status_code=503, detail="Network error while fetching data — please try again.")
 
     scraped_at = datetime.now(timezone.utc).isoformat()
@@ -320,7 +326,7 @@ def analyze(request: Request, body: AnalyzeRequest):
         news = fetch_news(signals.meta.name, ticker)
     except Exception as e:
         # News failure is non-fatal — analysis proceeds without it
-        print(f"Warning: news fetch failed for '{ticker}': {e}")
+        logger.warning("News fetch failed for '%s': %s", ticker, e)
 
     # --- Step 4: Run 5 analyst agents in parallel ---
     # Each agent makes 1 GPT-4o call. Parallel execution keeps total latency
@@ -339,10 +345,10 @@ def analyze(request: Request, body: AnalyzeRequest):
         except (RateLimitError, APITimeoutError, OpenAIServerError) as e:
             # Transient errors — worth retrying once
             if attempt == 1:
-                print(f"Warning: synthesis failed after 2 attempts for '{ticker}': {e}")
+                logger.warning("Synthesis failed after 2 attempts for '%s': %s", ticker, e)
         except Exception as e:
             # Permanent error (bad key, invalid model, etc.) — fail immediately
-            print(f"Warning: synthesis failed with non-retryable error for '{ticker}': {e}")
+            logger.warning("Synthesis failed with non-retryable error for '%s': %s", ticker, e)
             break
 
     # --- Step 6: Fetch BSE filings (non-blocking — failure captured in error field) ---
@@ -355,9 +361,9 @@ def analyze(request: Request, body: AnalyzeRequest):
             filings = fetch_filings(bse_code)
         except Exception as e:
             # Filings failure is non-fatal — a BSE API outage must never break analysis
-            print(f"Warning: filings fetch failed for '{ticker}' (BSE {bse_code}): {e}")
+            logger.warning("Filings fetch failed for '%s' (BSE %s): %s", ticker, bse_code, e)
     else:
-        print(f"Warning: no BSE code found for '{ticker}' — skipping filings.")
+        logger.warning("No BSE code found for '%s' — skipping filings.", ticker)
 
     result = {
         "scraped_at":     scraped_at,
@@ -374,13 +380,13 @@ def analyze(request: Request, body: AnalyzeRequest):
     try:
         set_cached(ticker, result)
     except Exception as e:
-        print(f"Warning: cache write failed for '{ticker}': {e}")
+        logger.warning("Cache write failed for '%s': %s", ticker, e)
 
     # --- Step 7: Persist to analyst_history (Phase 6) ---
     try:
         save_analysis(ticker, result)
     except Exception as e:
-        print(f"Warning: memory write failed for '{ticker}': {e}")
+        logger.warning("Memory write failed for '%s': %s", ticker, e)
 
     return {"source": "live", **result}
 

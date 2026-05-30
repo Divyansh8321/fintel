@@ -10,9 +10,12 @@
 # ============================================================
 
 import json
+import logging
 import os
 
 import requests
+
+logger = logging.getLogger(__name__)
 from dotenv import load_dotenv
 
 from src.llm import call_fast_model
@@ -61,7 +64,7 @@ def fetch_news(company_name: str, ticker: str) -> dict:
     if response.status_code != 200:
         body = response.json() if response.content else {}
         message = body.get("message", response.text)
-        print(f"NewsAPI error {response.status_code}: {message}")
+        logger.warning("NewsAPI error %s: %s", response.status_code, message)
         raise RuntimeError("News data unavailable — NewsAPI request failed.")
 
     data = response.json()

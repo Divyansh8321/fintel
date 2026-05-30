@@ -12,8 +12,11 @@
 # ============================================================
 
 import json
+import logging
 import os
 import sqlite3
+
+logger = logging.getLogger(__name__)
 from datetime import datetime, timezone
 
 # Reuse the same DB file as cache.py — anchored to this file's location
@@ -125,10 +128,10 @@ def save_analysis(ticker: str, result: dict) -> None:
         try:
             clamped = max(1.0, min(10.0, float(consensus)))
             if clamped != float(consensus):
-                print(f"Warning: consensus score {consensus} out of 1–10 range for '{ticker}' — clamped to {clamped}")
+                logger.warning("Consensus score %s out of 1–10 range for '%s' — clamped to %s", consensus, ticker, clamped)
             consensus = clamped
         except (TypeError, ValueError):
-            print(f"Warning: consensus score {consensus!r} for '{ticker}' is not numeric — storing as None")
+            logger.warning("Consensus score %r for '%s' is not numeric — storing as None", consensus, ticker)
             consensus = None
 
     # Agents dict — default to empty if pre-Phase 3
