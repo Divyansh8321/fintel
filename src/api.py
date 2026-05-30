@@ -22,12 +22,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
+import os
 
 import requests as req_lib
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from openai import OpenAIError
 from pydantic import BaseModel, ValidationError
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from src.agents.contrarian import analyze as contrarian_analyze
 from src.agents.growth import analyze as growth_analyze
@@ -50,6 +54,14 @@ from src.signals import compute_signals
 from src.synthesis import synthesise
 
 load_dotenv()
+
+# ---------------------------------------------------------------------------
+# Rate limiter — configurable via ANALYZE_RATE_LIMIT in .env
+# Default: 20/minute (generous for local use; tighten before deploying).
+# Format follows slowapi: "N/second", "N/minute", "N/hour", "N/day".
+# ---------------------------------------------------------------------------
+_RATE_LIMIT = os.getenv("ANALYZE_RATE_LIMIT", "20/minute")
+limiter = Limiter(key_func=get_remote_address, default_limits=[])
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +89,8 @@ app = FastAPI(
     version="6.0.0",
     lifespan=lifespan,
 )
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +214,8 @@ def health():
 # ---------------------------------------------------------------------------
 
 @app.post("/analyze")
-def analyze(body: AnalyzeRequest):
+@limiter.limit(_RATE_LIMIT)
+def analyze(request: Request, body: AnalyzeRequest):
     """
     Main analysis endpoint. Runs the full Phase 5 pipeline + Phase 6 memory:
       1. Scrape fundamental data from Screener.in
