@@ -128,6 +128,8 @@ def _classify_sentiment(company_name: str, ticker: str, articles: list) -> tuple
             messages=[{"role": "user", "content": prompt}],
             max_tokens=150,
             temperature=0,
+            call_type="news",
+            ticker=ticker,
         ).strip()
         parsed = json.loads(raw)
         sentiment = parsed.get("sentiment", "neutral")

@@ -205,29 +205,6 @@ Graham Number is fully computable from data we already have, is objective, and h
 
 **Implication:** Valuation score for high-growth companies will systematically skew lower (they trade above Graham Number by design). The LLM explanation must contextualise this — a high-quality growth company trading at 2x Graham Number is not necessarily overvalued.
 
----
-
-## T-009: LLM Model Selection — GPT-4o vs Finance-Specific Alternatives
-
-**Phase:** 2 — Analysis
-**Context:** We researched whether a finance-specific or higher-performing LLM should replace GPT-4o.
-
-**Researched alternatives:**
-- BloombergGPT: embedded in Bloomberg Terminal ($30K/user/year). No public API. Not viable.
-- FinGPT: open-source, HuggingFace only. Self-hosted. No public API.
-- Claude Sonnet 4.6: 63.3% on Finance Agent benchmark — state of the art. $3/$15 per M tokens.
-- Claude Opus 4.6: 87.82% on FinanceReasoning benchmark, 60.7% on Finance Agent. $5/$25 per M tokens.
-- Gemini 3.1 Pro: 86.55% on FinanceReasoning. Competitive.
-- GPT-4o: solid baseline, good mathematical reasoning, well-established.
-
-**Constraint:** CLAUDE.md Rule 7 mandates "Use OpenAI API only (not Anthropic) for demo purposes."
-
-**Decision:** Keep GPT-4o, constrained by Rule 7.
-The LLM's role in Phase 2 is narrow: it receives pre-computed signals and explains them in plain English. The quality difference between GPT-4o and Claude Sonnet 4.6 for narrating a Piotroski score is marginal. The intelligence lives in `signals.py`, not the LLM.
-
-**Upgrade path:** If Rule 7 is lifted, swap to Claude Sonnet 4.6 — better financial reasoning benchmarks, larger context window, similar pricing to GPT-4o.
-
-**Implication:** This decision can be reversed by changing a single model string in `analysis.py` and updating CLAUDE.md Rule 7. It does not affect any other part of the system.
 
 ---
 

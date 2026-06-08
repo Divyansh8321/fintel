@@ -250,6 +250,7 @@ def _summarise_pdf(pdf_url: str, title: str) -> str | None:
             ],
             max_tokens=200,
             temperature=0.1,
+            call_type="filing",
         ).strip()
     except Exception as e:
         logger.warning("Filing summarisation LLM call failed for '%s': %s", title, e)

@@ -4,7 +4,7 @@
 AI-powered investment research tool for Indian stocks (NSE tickers).
 Scrapes Screener.in → computes ~40 signals in Python → runs 5 analyst agents → synthesises verdict.
 
-**Core principle:** Python does the maths. GPT-4o explains the maths. Never the other way around.
+**Core principle:** Python does the maths. GPT-5-mini explains the maths. Never the other way around.
 
 **Status:** All 6 phases complete. Active work tracked via GitHub Issues.
 
@@ -26,8 +26,7 @@ src/scraper.py       ← Screener.in scraper
 src/cache.py         ← SQLite cache (3 functions only)
 src/signals.py       ← quantitative signal engine
 src/news.py          ← NewsAPI + sentiment
-src/agents/          ← value, growth, quality, contrarian, momentum
-src/synthesis.py     ← aggregates 5 agent notes → verdict
+src/agents/          ← single agent for brief
 src/filings.py       ← BSE announcements
 src/memory.py        ← history + watchlist
 src/api.py           ← FastAPI backend
@@ -53,8 +52,7 @@ tests/test_scraper.py
 
 **5. API Keys** — `.env` only. Never hardcoded. Required: `OPENAI_API_KEY`, `SCREENER_EMAIL`, `SCREENER_PASSWORD`, `NEWS_API_KEY`.
 
-**6. LLM** — OpenAI only. `gpt-4o` for analysts + synthesis. `gpt-4o-mini` for sentiment + filing summaries. 6 total calls per analysis.
-   → Read TRADEOFFS.md T-009 before switching LLM providers.
+**6. LLM** — OpenAI only. `gpt-5-mini` for brief generation. `gpt-4o-mini` for sentiment + filing summaries. 1 total call per analysis.
 
 **7. Caching** — SQLite, 24h TTL, `data/cache/fintel.db`. `cache.py` has exactly 3 functions. No ORM.
    → Read TRADEOFFS.md T-002 before changing cache backend.
@@ -90,7 +88,6 @@ Run `/improve-codebase` after any surge of development.
 - Changing what LLM computes vs what Python computes → T-005
 - Changing news data source → T-007
 - Changing valuation anchor (Graham Number / DCF) → T-008
-- Switching LLM provider → T-009
 - Changing how scores are derived → T-010
 - Changing signal error handling → T-011
 - After any decision not covered above → **add a new entry to TRADEOFFS.md** using the same format
@@ -101,4 +98,3 @@ Run `/improve-codebase` after any surge of development.
 - NewsAPI free tier: 100 req/day
 - DCF returns None for negative-FCF companies — correct by design
 - Banks/NBFCs break the scraper (different P&L structure)
-- 6 GPT-4o calls ≈ 30–40s per analysis, not streamed

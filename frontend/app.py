@@ -1,15 +1,12 @@
 # ============================================================
 # FILE: frontend/app.py
-# PURPOSE: Streamlit UI for Fintel. Phase 6 information-dense
-#          research dashboard: signal panel (Piotroski, DuPont,
-#          Graham Number, DCF valuation, earnings quality,
-#          quarterly momentum), five analyst note panels,
-#          synthesis verdict panel, analyst score comparison
-#          bar chart, recent news, BSE corporate filings,
-#          historical consensus score chart, and watchlist.
-# INPUT:   User-entered NSE ticker string
-# OUTPUT:  Full multi-analyst research dashboard + filings panel
-#          + history chart + watchlist management
+# PURPOSE: Streamlit UI for Fintel v2. Deep research brief
+#          dashboard: signal panel, single deep brief with
+#          bull/base/bear scenarios, conviction drivers, red
+#          flags, moat, verdict + sizing, and conversational
+#          follow-up chat. Replaces the five-analyst panel.
+# INPUT:   User-entered NSE ticker + optional thesis string
+# OUTPUT:  Full research dashboard + brief + chat interface
 # DEPENDS: streamlit, requests, src/api.py running on :8000
 # ============================================================
 
@@ -21,33 +18,72 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Backend base URL — override via FINTEL_API_BASE in .env before deploying.
-_API_BASE = os.getenv("FINTEL_API_BASE", "http://localhost:8000")
-API_URL   = f"{_API_BASE}/analyze"
-
-# Passed as X-API-Key header on every backend call.
-# Matches FINTEL_API_KEY in .env — empty string when unset (auth off locally).
+_API_BASE    = os.getenv("FINTEL_API_BASE", "http://localhost:8000")
+API_URL      = f"{_API_BASE}/analyze"
+CHAT_URL     = f"{_API_BASE}/chat"
 _API_HEADERS = {"X-API-Key": os.getenv("FINTEL_API_KEY", "")}
 
 st.set_page_config(page_title="Fintel", page_icon="📈", layout="wide")
 st.title("Fintel — AI Investment Research")
-st.caption("Indian stocks · Screener.in data · GPT-4o multi-analyst engine · Phase 6")
+st.caption("Indian stocks · Screener.in data · DeepSeek deep brief engine · v2")
 
 # ---------------------------------------------------------------------------
-# Sidebar — Watchlist panel (Phase 6)
+# Sidebar — Watchlist panel
 # ---------------------------------------------------------------------------
 
 with st.sidebar:
+    # -----------------------------------------------------------------------
+    # Telemetry panel — cost + latency at a glance
+    # -----------------------------------------------------------------------
+    st.header("API Telemetry")
+    try:
+        tm_resp = requests.get(f"{_API_BASE}/telemetry", headers=_API_HEADERS, timeout=5)
+        tm = tm_resp.json() if tm_resp.status_code == 200 else {}
+    except requests.exceptions.ConnectionError:
+        tm = {}
+
+    if tm:
+        tm_c1, tm_c2 = st.columns(2)
+        tm_c1.metric("Total calls", tm.get("total_calls", 0))
+        tm_c2.metric("Total cost", f"${tm.get('total_cost_usd', 0):.4f}")
+        st.metric("Avg latency", f"{tm.get('avg_latency_ms', 0):.0f} ms")
+
+        by_type = tm.get("by_type", [])
+        if by_type:
+            with st.expander("By call type"):
+                for row in by_type:
+                    st.write(
+                        f"**{row['call_type']}** — "
+                        f"{row['calls']} calls · "
+                        f"${row['cost_usd']:.4f} · "
+                        f"{row['avg_latency_ms']:.0f} ms avg"
+                    )
+
+        recent = tm.get("recent", [])
+        if recent:
+            with st.expander("Last 10 calls"):
+                for r in recent[:10]:
+                    st.caption(
+                        f"{r['called_at'][11:19]} UTC · "
+                        f"**{r['call_type']}** · "
+                        f"{r['ticker'] or '—'} · "
+                        f"{r['tokens_in']}→{r['tokens_out']} tok · "
+                        f"${r['cost_usd']:.5f} · "
+                        f"{r['latency_ms']:.0f} ms"
+                    )
+    else:
+        st.caption("No telemetry yet — run an analysis first.")
+
+    st.divider()
+
     st.header("Watchlist")
 
-    # Fetch current watchlist from API
     try:
-        wl_resp = requests.get(f"{_API_BASE}/watchlist", headers=_API_HEADERS, timeout=5)
+        wl_resp  = requests.get(f"{_API_BASE}/watchlist", headers=_API_HEADERS, timeout=5)
         watchlist = wl_resp.json().get("watchlist", []) if wl_resp.status_code == 200 else []
     except requests.exceptions.ConnectionError:
         watchlist = []
 
-    # Display existing watchlist entries with per-ticker remove button
     if watchlist:
         for item in watchlist:
             wl_col1, wl_col2 = st.columns([3, 1])
@@ -72,7 +108,6 @@ with st.sidebar:
 
     st.divider()
 
-    # Form to add a new ticker to the watchlist
     with st.form("add_watchlist_form", clear_on_submit=True):
         new_ticker = st.text_input("Ticker", placeholder="e.g. INFY").strip().upper()
         new_note   = st.text_input("Note (optional)", placeholder="e.g. Watch Q3 results")
@@ -95,7 +130,7 @@ with st.sidebar:
             st.error("API not reachable.")
 
 # ---------------------------------------------------------------------------
-# Input row
+# Input row — ticker + thesis + buttons
 # ---------------------------------------------------------------------------
 
 ticker_col, btn_col1, btn_col2 = st.columns([4, 1, 1])
@@ -104,6 +139,17 @@ ticker = ticker_col.text_input(
 ).strip().upper()
 analyze_clicked = btn_col1.button("Analyze", disabled=not ticker, use_container_width=True)
 clear_clicked   = btn_col2.button("Clear Cache", disabled=not ticker, use_container_width=True)
+
+thesis = st.text_area(
+    "Your thesis (optional)",
+    placeholder=(
+        "What's drawing you to this stock? "
+        "e.g. 'I think the new management will drive margin expansion' "
+        "or 'I'm bearish — worried about the debt load'. Leave blank for a neutral view."
+    ),
+    height=80,
+    label_visibility="visible",
+)
 
 if clear_clicked and ticker:
     try:
@@ -124,9 +170,14 @@ if not analyze_clicked:
 # Fetch data
 # ---------------------------------------------------------------------------
 
-with st.spinner(f"Fetching data for **{ticker}** — scraping + signals + news + 5 analysts + synthesis + filings…"):
+with st.spinner(f"Fetching data for **{ticker}** — scraping + signals + news + deep brief…"):
     try:
-        resp = requests.post(API_URL, json={"ticker": ticker}, headers=_API_HEADERS, timeout=300)
+        resp = requests.post(
+            API_URL,
+            json={"ticker": ticker, "thesis": thesis},
+            headers=_API_HEADERS,
+            timeout=300,
+        )
         resp.raise_for_status()
         result = resp.json()
     except requests.exceptions.ConnectionError:
@@ -137,27 +188,30 @@ with st.spinner(f"Fetching data for **{ticker}** — scraping + signals + news +
         st.error(f"Error {resp.status_code}: {detail}")
         st.stop()
 
-source    = result.get("source", "live")
-data      = result.get("data")
-signals   = result.get("signals")
-news      = result.get("news")
-filings   = result.get("filings")
+source  = result.get("source", "live")
+data    = result.get("data")
+signals = result.get("signals")
+news    = result.get("news")
+filings = result.get("filings")
+brief   = result.get("brief", {})
 
 if data is None or signals is None:
-    st.error("Unexpected API response — missing 'data' or 'signals'. Try clearing the cache and re-analysing.")
+    st.error("Unexpected API response — missing 'data' or 'signals'. Try clearing the cache.")
     st.stop()
 
-# API returns analyst_notes as a list; convert to dict keyed by lens for easy lookup.
-agents    = {n["lens"]: n for n in result.get("analyst_notes", [])}
-synthesis = result["synthesis"]   # consensus verdict dict
+# Store brief + signals in session_state for the chat interface
+st.session_state["brief"]   = brief
+st.session_state["signals"] = signals
+st.session_state["ticker"]  = ticker
+if "chat_history" not in st.session_state or st.session_state.get("ticker") != ticker:
+    st.session_state["chat_history"] = []
 
-header = data.get("header", {})
-
+header       = data.get("header", {})
 source_label = "cached" if source == "cache" else "live scrape"
 st.success(f"**{header.get('name', ticker)}** — served from **{source}** ({source_label})")
 
 # ---------------------------------------------------------------------------
-# Row 1 — Scores + company snapshot
+# Row 1 — Key metrics snapshot
 # ---------------------------------------------------------------------------
 
 st.divider()
@@ -166,14 +220,13 @@ r1c1, r1c2, r1c3, r1c4, r1c5 = st.columns(5)
 r1c1.metric("Fundamentals", f"{signals.get('fundamentals_score', '—')} / 10")
 r1c2.metric("Valuation", f"{signals.get('valuation_score', '—')} / 10")
 
-# News sentiment badge
 news_sentiment = news.get("sentiment", "neutral") if news else "unavailable"
 _SENTIMENT_ICON = {"bullish": "🟢", "neutral": "⚪", "bearish": "🔴", "unavailable": "⚫"}
 r1c3.metric("News Sentiment", f"{_SENTIMENT_ICON.get(news_sentiment, '')} {news_sentiment.title()}")
 
 kr = data.get("key_ratios", {})
 r1c4.metric("PE", f"{kr.get('pe', '—')}x" if kr.get("pe") else "—")
-r1c5.metric("ROCE", f"{kr.get('roce', '—')}%"  if kr.get("roce") else "—")
+r1c5.metric("ROCE", f"{kr.get('roce', '—')}%" if kr.get("roce") else "—")
 
 # ---------------------------------------------------------------------------
 # Row 2 — Piotroski F-Score
@@ -248,7 +301,7 @@ vc1, vc2, vc3 = st.columns(3)
 val = signals.get("valuation", {})
 
 if val.get("graham_number") is not None:
-    prem = val["price_to_graham"]
+    prem     = val["price_to_graham"]
     prem_pct = prem * 100
     direction = "premium" if prem > 0 else "discount"
     vc1.metric(
@@ -266,8 +319,6 @@ vc3.metric(
     f"{val['earnings_yield']:.2f}%" if val.get("earnings_yield") is not None else "—"
 )
 
-# DCF sub-panel — shown only when a valid intrinsic value was computed.
-# dcf_verdict is "undervalued" | "fairly_valued" | "overvalued" | None
 _DCF_VERDICT_ICON = {
     "undervalued":   "🟢 Undervalued",
     "fairly_valued": "🟡 Fairly valued",
@@ -279,23 +330,19 @@ dcf_mos       = val.get("dcf_margin_of_safety")
 dcf_g1        = val.get("dcf_stage1_growth")
 dcf_reason    = val.get("dcf_intrinsic_value_reason")
 
-dc1, dc2, dc3 = st.columns(3)
+dc1v, dc2v, dc3v = st.columns(3)
 if dcf_intrinsic is not None:
-    dc1.metric("DCF Intrinsic Value", f"₹{dcf_intrinsic:,.0f}")
-    dc2.metric(
+    dc1v.metric("DCF Intrinsic Value", f"₹{dcf_intrinsic:,.0f}")
+    dc2v.metric(
         "Margin of Safety",
         f"{dcf_mos * 100:+.1f}%" if dcf_mos is not None else "—",
         delta_color="normal",
     )
-    dc3.metric(
-        "DCF Verdict",
-        _DCF_VERDICT_ICON.get(dcf_verdict, dcf_verdict or "—"),
-    )
+    dc3v.metric("DCF Verdict", _DCF_VERDICT_ICON.get(dcf_verdict, dcf_verdict or "—"))
     if dcf_g1 is not None:
         st.caption(f"Stage-1 growth rate used: **{dcf_g1:.1f}%** · WACC: 12% · Terminal: 4%")
 else:
-    # DCF could not be computed — show the reason so the user understands why
-    dc1.metric("DCF Intrinsic Value", "—")
+    dc1v.metric("DCF Intrinsic Value", "—")
     if dcf_reason:
         st.caption(f"DCF unavailable: {dcf_reason}")
 
@@ -309,8 +356,8 @@ mc1, mc2 = st.columns(2)
 with mc1:
     st.subheader("Quarterly Momentum")
     qm = signals.get("quarterly_momentum", {})
-    rev_yoy = qm.get("revenue_yoy_pct")
-    pnl_yoy = qm.get("profit_yoy_pct")
+    rev_yoy  = qm.get("revenue_yoy_pct")
+    pnl_yoy  = qm.get("profit_yoy_pct")
     opm_trend = qm.get("opm_trend", "—")
     mc1.metric("Revenue YoY", f"{rev_yoy:+.1f}%" if rev_yoy is not None else "—")
     mc1.metric("Profit YoY",  f"{pnl_yoy:+.1f}%" if pnl_yoy is not None else "—")
@@ -319,7 +366,7 @@ with mc1:
 with mc2:
     st.subheader("Balance Sheet Health")
     bsh = signals.get("balance_sheet_health", {})
-    ce = signals.get("capital_efficiency", {})
+    ce  = signals.get("capital_efficiency", {})
     mc2.metric("Debt/Equity", f"{bsh.get('debt_to_equity_latest', '—')}x" if bsh.get("debt_to_equity_latest") is not None else "—")
     mc2.metric("Interest Coverage", f"{bsh.get('interest_coverage', '—')}x" if bsh.get("interest_coverage") is not None else "—")
     mc2.caption(f"Debt trend: **{bsh.get('debt_trend', '—')}** · ROCE trend: **{ce.get('roce_trend', '—')}**")
@@ -329,135 +376,104 @@ with mc2:
 # ---------------------------------------------------------------------------
 
 pr = signals.get("promoter_risk", {})
-pledge_pct = pr.get("pledged_pct", 0)
-pledge_flag = pr.get("pledge_flag", "none")
+pledge_pct   = pr.get("pledged_pct", 0)
+pledge_flag  = pr.get("pledge_flag", "none")
 pledge_trend = pr.get("pledge_trend", "stable")
 if pledge_flag != "none":
     st.warning(f"⚠️ Promoter pledging: {pledge_pct:.1f}% ({pledge_flag}) — trend: {pledge_trend}")
 
 # ---------------------------------------------------------------------------
-# Phase 3 — Multi-Analyst Panel
+# Deep Research Brief
 # ---------------------------------------------------------------------------
 
 st.divider()
-st.header("Multi-Analyst Research Panel")
+st.header("Deep Research Brief")
 
-_LENS_LABELS = {
-    "value":      "Value (Graham)",
-    "growth":     "Growth (Lynch)",
-    "quality":    "Quality (Munger)",
-    "contrarian": "Contrarian (Burry)",
-    "momentum":   "Momentum",
-}
-_ACTION_ICON = {"buy": "🟢 Buy", "hold": "🟡 Hold", "sell": "🔴 Sell", "avoid": "⚫ Avoid"}
+if brief.get("error"):
+    st.error(f"Brief generation failed: {brief['error']}")
+else:
+    _ACTION_ICON = {"buy": "🟢 Buy", "hold": "🟡 Hold", "sell": "🔴 Sell", "avoid": "⚫ Avoid"}
+    verdict = brief.get("verdict", "")
+    sizing  = brief.get("sizing", "")
 
-# -----------------------------------------------------------------------
-# Analyst score comparison bar chart
-# Each analyst returns a score 1–10. We plot them side by side so the
-# reader can immediately see which lenses are bullish vs bearish.
-# -----------------------------------------------------------------------
+    # Verdict + sizing — top of brief
+    verdict_col, sizing_col = st.columns([1, 3])
+    with verdict_col:
+        st.markdown(f"### {_ACTION_ICON.get(verdict, verdict.title())}")
+    with sizing_col:
+        if sizing:
+            st.markdown(f"**Position sizing:** {sizing}")
 
-# Build {label: score} dict, skipping any agent that errored out.
-score_data = {}
-for lens, note in agents.items():
-    if "error" not in note and note.get("score") is not None:
-        score_data[_LENS_LABELS.get(lens, lens.title())] = note["score"]
+    # Situation
+    situation = brief.get("situation", "")
+    if situation:
+        st.markdown(f"**Situation:** {situation}")
 
-st.subheader("Analyst Score Comparison (1–10)")
-st.bar_chart(score_data, height=250)
+    # User thesis addressed
+    utha = brief.get("user_thesis_addressed")
+    if utha:
+        st.info(f"**On your thesis:** {utha}")
 
-# -----------------------------------------------------------------------
-# Five analyst note panels — rendered in a fixed 5-column grid.
-# Each panel shows: score, action badge, thesis, key signals, risks.
-# -----------------------------------------------------------------------
+    st.divider()
 
-st.subheader("Analyst Notes")
-note_cols = st.columns(5)
+    # Bull / Base / Bear cases
+    case_col1, case_col2, case_col3 = st.columns(3)
 
-_DISPLAY_ORDER = ["value", "growth", "quality", "contrarian", "momentum"]
-for col_idx, lens in enumerate(_DISPLAY_ORDER):
-    note  = agents.get(lens, {})
-    col   = note_cols[col_idx]
-    label = _LENS_LABELS.get(lens, lens.title())
+    bull = brief.get("bull_case", {})
+    with case_col1:
+        st.markdown("**Bull Case**")
+        st.write(bull.get("narrative", "—"))
+        target = bull.get("price_target_inr")
+        if target:
+            st.metric("Target", f"₹{target:,.0f}")
 
-    with col:
-        st.markdown(f"**{label}**")
+    base = brief.get("base_case", {})
+    with case_col2:
+        st.markdown("**Base Case**")
+        st.write(base.get("narrative", "—"))
+        target = base.get("price_target_inr")
+        if target:
+            st.metric("Target", f"₹{target:,.0f}")
 
-        # If this agent errored, show a minimal error state.
-        if "error" in note:
-            st.error(f"Agent error: {note['error']}")
-            continue
+    bear = brief.get("bear_case", {})
+    with case_col3:
+        st.markdown("**Bear Case**")
+        st.write(bear.get("narrative", "—"))
+        target = bear.get("price_target_inr")
+        if target:
+            st.metric("Target", f"₹{target:,.0f}")
 
-        # Score and action in compact form.
-        score  = note.get("score", "—")
-        action = note.get("action", "")
-        st.metric("Score", f"{score} / 10")
-        st.write(_ACTION_ICON.get(action, action.title()))
+    st.divider()
 
-        # Investment thesis (full text — primary read).
-        thesis = note.get("thesis", "")
-        if thesis:
-            st.caption(thesis)
+    # Buy on dip
+    dip = brief.get("buy_on_dip", {})
+    dip_level = dip.get("level_inr")
+    dip_rationale = dip.get("rationale", "")
+    if dip_level or dip_rationale:
+        dip_txt = f"**Buy on dip:**"
+        if dip_level:
+            dip_txt += f" ₹{dip_level:,.0f} —"
+        if dip_rationale:
+            dip_txt += f" {dip_rationale}"
+        st.markdown(dip_txt)
 
-        # Key signals that drove the score.
-        key_signals = note.get("key_signals", [])
-        if key_signals:
-            st.markdown("**Key signals:**")
-            for sig in key_signals:
-                st.write(f"• {sig}")
+    # Conviction drivers + Red flags
+    drivers_col, flags_col = st.columns(2)
 
-        # Risks flagged by this analyst.
-        risks = note.get("risks", [])
-        if risks:
-            st.markdown("**Risks:**")
-            for risk in risks:
-                st.write(f"⚠ {risk}")
+    with drivers_col:
+        st.markdown("**Top 3 Conviction Drivers**")
+        for driver in brief.get("conviction_drivers", []):
+            st.write(f"✅ {driver}")
 
-# -----------------------------------------------------------------------
-# Synthesis verdict panel
-# Shows the weighted consensus score, bull/bear case, and final verdict.
-# -----------------------------------------------------------------------
+    with flags_col:
+        st.markdown("**Top 3 Red Flags**")
+        for flag in brief.get("red_flags", []):
+            st.write(f"⚠️ {flag}")
 
-st.divider()
-st.subheader("Synthesis — Consensus Verdict")
-
-syn_score   = synthesis.get("weighted_score")
-# Derive the display action from the action_tally (most-voted action wins).
-_tally      = synthesis.get("action_tally", {})
-syn_action  = max(_tally, key=_tally.get) if _tally else ""
-syn_verdict = synthesis.get("verdict", "")
-
-sv1, sv2 = st.columns([1, 4])
-sv1.metric(
-    "Consensus Score",
-    f"{syn_score:.1f} / 10" if syn_score is not None else "—",
-)
-sv2.markdown(f"### {_ACTION_ICON.get(syn_action, syn_action.title())}")
-
-if syn_verdict:
-    st.write(syn_verdict)
-
-# Bull / bear case in two columns.
-bull = synthesis.get("bull_case", "")
-bear = synthesis.get("bear_case", "")
-if bull or bear:
-    bc1, bc2 = st.columns(2)
-    with bc1:
-        st.markdown("**Bull case**")
-        st.write(bull or "—")
-    with bc2:
-        st.markdown("**Bear case**")
-        st.write(bear or "—")
-
-# Per-analyst weight breakdown — in an expander to keep the main view clean.
-weights = synthesis.get("effective_weights", {})
-if weights:
-    with st.expander("Score weights breakdown"):
-        for lens, w in weights.items():
-            lbl  = _LENS_LABELS.get(lens, lens.title())
-            note = agents.get(lens, {})
-            sc   = note.get("score", "—") if "error" not in note else "error"
-            st.write(f"**{lbl}**: score {sc}/10 · weight {w*100:.0f}%")
+    # Moat assessment
+    moat = brief.get("moat", "")
+    if moat:
+        st.markdown(f"**Moat:** {moat}")
 
 # ---------------------------------------------------------------------------
 # News panel
@@ -485,7 +501,6 @@ st.divider()
 st.subheader("Recent BSE Filings")
 
 if filings is None:
-    # No BSE code scraped, or fetch threw an exception
     bse_code_display = data.get("header", {}).get("bse_code", "")
     if not bse_code_display:
         st.caption("BSE code not found for this ticker — filings unavailable.")
@@ -496,16 +511,13 @@ elif filings.get("error"):
 elif not filings.get("filings"):
     st.caption("No recent BSE announcements found.")
 else:
-    # One expander per filing: date · category · title in the header; summary inside.
     for filing in filings["filings"]:
         f_title    = filing.get("title", "Untitled")
         f_date     = filing.get("date", "")
         f_category = filing.get("category", "")
         f_pdf_url  = filing.get("pdf_url")
         f_summary  = filing.get("summary")
-
         header_line = f"{f_date}  ·  {f_category}  ·  {f_title}" if (f_date or f_category) else f_title
-
         with st.expander(header_line):
             if f_summary:
                 st.write(f_summary)
@@ -515,26 +527,23 @@ else:
                 st.markdown(f"[View PDF on BSE]({f_pdf_url})")
 
 # ---------------------------------------------------------------------------
-# Phase 6 — Historical Score Chart
+# Historical Score Chart
 # ---------------------------------------------------------------------------
 
 st.divider()
 st.subheader(f"Analysis History — {ticker}")
 
 try:
-    hist_resp = requests.get(f"{_API_BASE}/history/{ticker}", headers=_API_HEADERS, timeout=5)
+    hist_resp    = requests.get(f"{_API_BASE}/history/{ticker}", headers=_API_HEADERS, timeout=5)
     history_runs = hist_resp.json().get("runs", []) if hist_resp.status_code == 200 else []
 except requests.exceptions.ConnectionError:
     history_runs = []
 
 if history_runs:
-    # Build chart data: date label → consensus score.
-    # Runs arrive newest-first; reverse for chronological chart display.
     chart_rows = []
     for run in reversed(history_runs):
         score = run.get("consensus")
         if score is not None:
-            # Truncate timestamp to date+time for a readable x-axis label
             label = run["run_at"][:16].replace("T", " ")
             chart_rows.append({"date": label, "consensus": score})
 
@@ -549,7 +558,6 @@ if history_runs:
     else:
         st.info("Runs recorded but no consensus scores yet.")
 
-    # Expandable table of all runs
     with st.expander(f"All runs ({len(history_runs)})"):
         for run in history_runs:
             cols = st.columns([3, 2, 2])
@@ -558,6 +566,55 @@ if history_runs:
             cols[2].write(f"Verdict: **{run['verdict'] or '—'}**")
 else:
     st.info("No history yet for this ticker. Run an analysis to start tracking.")
+
+# ---------------------------------------------------------------------------
+# Conversational Follow-up Chat
+# ---------------------------------------------------------------------------
+
+st.divider()
+st.subheader("Ask a follow-up question")
+st.caption(
+    "Ask anything about this company — the analyst will answer using the brief and signals already in memory. "
+    "No re-fetching."
+)
+
+# Render existing chat history
+for msg in st.session_state.get("chat_history", []):
+    with st.chat_message(msg["role"]):
+        st.write(msg["content"])
+
+# Chat input
+question = st.chat_input("Ask a follow-up question about this stock…")
+if question:
+    # Append user message immediately
+    st.session_state["chat_history"].append({"role": "user", "content": question})
+    with st.chat_message("user"):
+        st.write(question)
+
+    # Call /chat endpoint
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking…"):
+            try:
+                chat_resp = requests.post(
+                    CHAT_URL,
+                    json={
+                        "ticker":          st.session_state.get("ticker", ticker),
+                        "question":        question,
+                        "brief":           st.session_state.get("brief", {}),
+                        "signals_summary": st.session_state.get("signals", {}),
+                    },
+                    headers=_API_HEADERS,
+                    timeout=60,
+                )
+                chat_resp.raise_for_status()
+                answer = chat_resp.json().get("answer", "No answer returned.")
+            except requests.exceptions.ConnectionError:
+                answer = "Cannot connect to the API."
+            except requests.exceptions.HTTPError as e:
+                answer = f"API error: {e}"
+
+        st.write(answer)
+        st.session_state["chat_history"].append({"role": "assistant", "content": answer})
 
 # ---------------------------------------------------------------------------
 # Raw data expanders — useful for debugging
@@ -570,8 +627,5 @@ with st.expander("Full raw data (JSON)"):
 with st.expander("Full signals (JSON)"):
     st.json(signals)
 
-with st.expander("Full agent notes (JSON)"):
-    st.json(agents)
-
-with st.expander("Full synthesis (JSON)"):
-    st.json(synthesis)
+with st.expander("Full brief (JSON)"):
+    st.json(brief)

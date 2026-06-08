@@ -12,7 +12,8 @@ beautifulsoup4==4.12.3
 lxml==5.2.1
 pdfplumber>=0.11.0
 
-# LLM — OpenAI gpt-4o
+# LLM — OpenAI SDK used for both gpt-4o-mini (news/filings) and DeepSeek V3
+# (deep brief + chat). DeepSeek uses OpenAI-compatible API — no extra package needed.
 openai==1.35.0
 
 # Backend
