@@ -1800,7 +1800,10 @@ def compute_signals(data):
     # Skip for banks — they never have working capital rows.
     if not is_bank:
         wc = _backfill_wc_from_days(data)
-        # NOTE: mutates data["balance_sheet"] in-place — callers must not rely on original WC rows after this call
+        # Shallow-copy top-level dict and the balance_sheet sub-dict so the
+        # original scraped/cached data is never modified by WC back-fill.
+        data = dict(data)
+        data["balance_sheet"] = dict(data["balance_sheet"])
         data["balance_sheet"]["trade_receivables"] = wc["trade_receivables"]
         data["balance_sheet"]["inventories"]       = wc["inventories"]
         data["balance_sheet"]["trade_payables"]    = wc["trade_payables"]
